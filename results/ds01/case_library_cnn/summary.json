@@ -1,0 +1,13 @@
+{
+  "n_windows_total": 29648,
+  "n_units": 2,
+  "global_rmse": 13.45304600149837,
+  "global_mae": 10.214537848658196,
+  "global_median_ae": 7.78842355,
+  "worst_eol_unit": 2,
+  "worst_eol_error": 0.21186936,
+  "best_eol_unit": 1,
+  "best_eol_error": 0.20867576,
+  "n_per_category": 20,
+  "predictions_src": "runs/20260306_093821_DS01-005_cnn_train/predictions.csv"
+}

@@ -1,0 +1,13 @@
+{
+  "n_windows_total": 29648,
+  "n_units": 2,
+  "global_rmse": 13.562729076324668,
+  "global_mae": 8.883081033093841,
+  "global_median_ae": 4.8138847,
+  "worst_eol_unit": 1,
+  "worst_eol_error": 1.061102,
+  "best_eol_unit": 2,
+  "best_eol_error": 1.006904,
+  "n_per_category": 20,
+  "predictions_src": "runs/20260306_094340_DS01-005_cyclelayer_v1_train/predictions.csv"
+}

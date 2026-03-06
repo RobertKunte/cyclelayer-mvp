@@ -1,0 +1,3 @@
+unit_id,eol_y_true,eol_y_pred,eol_abs_error,n_windows,mean_abs_error,source_file,rank_tag
+1,0.0,1.061102,1.061102,8666,15.051368426417634,runs/20260306_094340_DS01-005_cyclelayer_v1_train/predictions.csv,worst
+2,0.0,1.006904,1.006904,20982,6.335450752351111,runs/20260306_094340_DS01-005_cyclelayer_v1_train/predictions.csv,best

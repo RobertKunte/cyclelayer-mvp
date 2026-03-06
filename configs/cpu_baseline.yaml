@@ -1,0 +1,48 @@
+# CPU-friendly baseline config — stride_train=200, num_workers=0
+# Reuses splits from the standard run if they exist.
+
+seed: 42
+
+data:
+  hdf5_path: "data/NCMAPSS/N-CMAPSS_DS01-005.h5"
+  window_size: 30
+  stride_train: 200             # ~17k train windows  (~2.5s/epoch on CPU)
+  stride_eval: 50               # ~30k eval windows   (~2s eval on CPU)
+  use_virtual_sensors: false
+  val_split: 0.15
+  test_split: 0.15
+  batch_size: 256
+  num_workers: 0                # 0 avoids spawn issues on Windows
+  max_rul: 99
+  split_dir: "splits/N-CMAPSS_DS01-005"   # reuse existing splits if present
+
+model:
+  type: "cnn"
+
+  cnn:
+    channels: [64, 128, 128]
+    kernel_size: 3
+    mlp_hidden: 128
+    dropout: 0.2
+
+  lstm:
+    hidden_size: 64
+    n_layers: 2
+    bidirectional: true
+    mlp_hidden: 64
+    dropout: 0.2
+
+training:
+  epochs: 50
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  mse_weight: 1.0
+  asymmetry: 0.5
+  lambda_theta: 0.0
+  use_amp: false                # no CUDA AMP on CPU
+  early_stopping_patience: 15
+  output_dir: "runs/cpu_baseline"
+
+evaluation:
+  checkpoint: "runs/cpu_baseline/best.pt"
+  alpha: 0.2

@@ -1,0 +1,74 @@
+# CycleLayerNet v0 (Brayton physics) and v1 (multi-task health params)
+#
+# model.type:
+#   "cyclelayer"    – v0: Encoder -> BraytonCycleLayer -> PrognosticsHead
+#   "cyclelayer_v1" – v1: Encoder -> theta_hat -> PrognosticsHead (multi-task)
+
+seed: 42
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data:
+  hdf5_path: "data/NCMAPSS/N-CMAPSS_DS01-005.h5"
+  window_size: 30
+  stride_train: 5               # stride for training DataLoader (fewer windows)
+  stride_eval: 1                # stride used by evaluate.py (full trajectory)
+  use_virtual_sensors: false
+  val_split: 0.15
+  test_split: 0.15
+  batch_size: 256
+  num_workers: 4
+  max_rul: 99                   # DS01 RUL range is 0-99
+  # split_dir: "splits/N-CMAPSS_DS01-005"
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  type: "cyclelayer_v1"         # switch to "cyclelayer" for v0
+
+  # Shared encoder settings
+  n_features: 18                # 4 op-conditions + 14 X_s sensors
+  window_size: 30
+  cnn_channels: [32, 64, 64]
+  encoder_kernel_size: 3
+  encoder_mlp_hidden: 128
+  encoder_dropout: 0.2
+  prog_hidden_sizes: [64, 32]
+  prog_dropout: 0.1
+  max_rul: 99
+
+  # v1 only: health parameter dimension (N-CMAPSS T_dev has 10 columns)
+  n_health_params: 10
+
+  # v0 only: Brayton cycle physical constants
+  n_theta: 5                    # [T1, pi, T3, eta_c, eta_t]
+  gamma: 1.4
+  cp: 1005.0
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  epochs: 50
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  mse_weight: 1.0
+  asymmetry: 0.5
+
+  # Multi-task theta supervision (v1 only; ignored for v0)
+  # Schedule: start high for strong early supervision, then relax
+  lambda_theta_start: 1.0       # lambda at epoch 1 (high supervision)
+  lambda_theta_end: 0.1         # lambda after warmup (relaxed)
+  lambda_theta_warmup_epochs: 10  # epochs to stay at start value (step schedule)
+  lambda_theta_schedule: "step" # "step" or "linear"
+  huber_delta: 0.1
+
+  # Physics penalties (v0 PhysicsInformedLoss; ignored when lambda_theta > 0)
+  use_physics_loss: false       # set true to enable for cyclelayer v0
+  feasibility_weight: 0.1
+  monotonicity_weight: 0.05
+
+  use_amp: true
+  early_stopping_patience: 15
+  output_dir: "runs/cyclelayer_v1"
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+evaluation:
+  checkpoint: "runs/cyclelayer_v1/best.pt"
+  alpha: 0.2

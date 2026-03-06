@@ -1,0 +1,57 @@
+# Baseline model configuration (CNN or LSTM, plain or +theta_true upper bound)
+#
+# model.type options:
+#   "cnn"        – plain CNN baseline
+#   "cnn_theta"  – CNN + theta_true concatenated (upper bound, Phase 1)
+#   "lstm"       – plain LSTM baseline
+#   "lstm_theta" – LSTM + theta_true (upper bound)
+
+seed: 42
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data:
+  hdf5_path: "data/NCMAPSS/N-CMAPSS_DS01-005.h5"
+  window_size: 30
+  stride_train: 5               # stride for training DataLoader (fewer windows)
+  stride_eval: 1                # stride used by evaluate.py (full trajectory)
+  use_virtual_sensors: false
+  val_split: 0.15               # fraction used for validation units
+  test_split: 0.15              # fraction held out as test units
+  batch_size: 256
+  num_workers: 4
+  max_rul: 99                   # DS01 RUL range is 0-99
+  # split_dir: "splits/N-CMAPSS_DS01-005"   # uncomment to reuse existing splits
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  type: "cnn"
+
+  cnn:
+    channels: [64, 128, 128]
+    kernel_size: 3
+    mlp_hidden: 128
+    dropout: 0.2
+
+  lstm:
+    hidden_size: 64
+    n_layers: 2
+    bidirectional: true
+    mlp_hidden: 64
+    dropout: 0.2
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  epochs: 50
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  mse_weight: 1.0
+  asymmetry: 0.5
+  lambda_theta: 0.0             # 0 = no theta supervision (pure RUL baseline)
+  use_amp: true
+  early_stopping_patience: 15
+  output_dir: "runs/baseline"
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+evaluation:
+  checkpoint: "runs/baseline/best.pt"
+  alpha: 0.2

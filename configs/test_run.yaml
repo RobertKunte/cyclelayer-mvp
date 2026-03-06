@@ -1,0 +1,47 @@
+# Quick test config — stride=100, 3 epochs, CPU-friendly
+# Used for smoke-testing all model types without HPC access.
+
+seed: 42
+
+data:
+  hdf5_path: "data/NCMAPSS/N-CMAPSS_DS01-005.h5"
+  window_size: 30
+  stride_train: 100        # ~50k train windows instead of 4.9M
+  stride_eval: 1           # full trajectory for evaluate.py
+  use_virtual_sensors: false
+  val_split: 0.15
+  test_split: 0.15
+  batch_size: 512
+  num_workers: 0           # no multiprocessing for test runs
+  max_rul: 99              # DS01 RUL range 0-99
+
+model:
+  type: "cnn"              # overridden via --model on the CLI
+
+  cnn:
+    channels: [32, 64]
+    kernel_size: 3
+    mlp_hidden: 64
+    dropout: 0.2
+
+  lstm:
+    hidden_size: 32
+    n_layers: 2
+    bidirectional: true
+    mlp_hidden: 64
+    dropout: 0.2
+
+training:
+  epochs: 3
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  mse_weight: 1.0
+  asymmetry: 0.5
+  lambda_theta: 0.0        # set >0 for cyclelayer_v1 multi-task; 0 for cnn/lstm
+  use_amp: false           # safe on CPU
+  early_stopping_patience: 99  # don't stop early in test runs
+  output_dir: "runs/test_run"  # override per run or set here
+
+evaluation:
+  checkpoint: "runs/test_run/best.pt"
+  alpha: 0.2

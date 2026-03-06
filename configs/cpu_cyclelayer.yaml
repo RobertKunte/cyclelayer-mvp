@@ -1,0 +1,56 @@
+# CPU-friendly cyclelayer_v1 config — stride_train=200, num_workers=0
+
+seed: 42
+
+data:
+  hdf5_path: "data/NCMAPSS/N-CMAPSS_DS01-005.h5"
+  window_size: 30
+  stride_train: 200             # ~17k train windows  (~4s/epoch on CPU)
+  stride_eval: 50               # ~30k eval windows   (~2s eval on CPU)
+  use_virtual_sensors: false
+  val_split: 0.15
+  test_split: 0.15
+  batch_size: 256
+  num_workers: 0
+  max_rul: 99
+  split_dir: "splits/N-CMAPSS_DS01-005"   # reuse splits from Case A
+
+model:
+  type: "cyclelayer_v1"
+
+  n_features: 18
+  window_size: 30
+  cnn_channels: [32, 64, 64]
+  encoder_kernel_size: 3
+  encoder_mlp_hidden: 128
+  encoder_dropout: 0.2
+  prog_hidden_sizes: [64, 32]
+  prog_dropout: 0.1
+  max_rul: 99
+  n_health_params: 10
+
+  n_theta: 5
+  gamma: 1.4
+  cp: 1005.0
+
+training:
+  epochs: 50
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  mse_weight: 1.0
+  asymmetry: 0.5
+
+  lambda_theta_start: 1.0
+  lambda_theta_end: 0.1
+  lambda_theta_warmup_epochs: 10
+  lambda_theta_schedule: "step"
+  huber_delta: 0.1
+
+  use_physics_loss: false
+  use_amp: false
+  early_stopping_patience: 15
+  output_dir: "runs/cpu_cyclelayer_v1"
+
+evaluation:
+  checkpoint: "runs/cpu_cyclelayer_v1/best.pt"
+  alpha: 0.2
