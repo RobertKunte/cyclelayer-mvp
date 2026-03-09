@@ -45,7 +45,7 @@ else:
 # Option A: Clone from GitHub (first run or if repo not yet mounted)
 # Option B: Repo already available (mounted drive or previously cloned)
 # --------------------------------------------------------------------------
-REPO_URL   = "https://github.com/YOUR_USERNAME/cyclelayer-mvp.git"  # ← EDIT
+REPO_URL   = "https://github.com/RobertKunte/cyclelayer-mvp.git"  # ← EDIT
 REPO_CLONE = True          # Set False if repo already exists at REPO_ROOT
 
 REPO_ROOT  = Path("/content/cyclelayer-mvp")   # where repo lives in Colab
@@ -53,7 +53,7 @@ REPO_ROOT  = Path("/content/cyclelayer-mvp")   # where repo lives in Colab
 # --------------------------------------------------------------------------
 # Dataset path — HDF5 on Google Drive
 # --------------------------------------------------------------------------
-DRIVE_DATA_PATH = Path("/content/drive/MyDrive/data/ncmapss/N-CMAPSS_DS01-005.h5")  # ← EDIT
+DRIVE_DATA_PATH = Path("/content/drive/MyDrive/cyclelayer-mvp/data/NCMAPSS/N-CMAPSS_DS01-005.h5")  # ← EDIT
 
 # --------------------------------------------------------------------------
 # Training settings
