@@ -14,8 +14,8 @@ venv/
 env/
 .env
 
-# Data (large HDF5 files)
-data/
+# Data (large HDF5 files) — /data/ anchors to repo root only
+/data/
 *.h5
 *.hdf5
 
