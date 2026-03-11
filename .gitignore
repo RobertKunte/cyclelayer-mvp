@@ -47,3 +47,10 @@ htmlcov/
 # Distribution
 *.tar.gz
 *.whl
+
+#results
+*.png
+*.csv
+*.json
+*.log
+results/

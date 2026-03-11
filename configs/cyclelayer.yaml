@@ -49,16 +49,15 @@ model:
 # ── Training ──────────────────────────────────────────────────────────────────
 training:
   epochs: 50
-  lr: 3.0e-4                    # recommended: 3e-4 for dense training (stride=5)
+  lr: 1.0e-4                    # 1e-4: reduced from 3e-4 to fix gnorm=NaN at epoch 1
                                 # use 1e-3 only for very sparse stride (>=100)
   weight_decay: 1.0e-4
   mse_weight: 1.0
   asymmetry: 0.1                # was 0.5; less downward bias on high-RUL predictions
 
   # Gradient clipping (highly recommended for stability with dense training)
-  # Set to 0 or null to disable.  1.0 is a safe default; reduce to 0.5 if
-  # val loss still explodes after epoch 5.
-  grad_clip_norm: 1.0
+  # Set to 0 or null to disable.
+  grad_clip_norm: 0.5           # reduced from 1.0; tighter clip to prevent gnorm=inf spikes
 
   # Multi-task theta supervision (v1 only; ignored for v0)
   # "delayed" schedule is best for stride_train=5: lets the RUL head converge
@@ -68,7 +67,7 @@ training:
   # "delayed": 0 for warmup epochs, then ramp 0->end over next warmup epochs
   lambda_theta_start: 1.0       # lambda at epoch 1 (step/linear); ignored by "delayed"
   lambda_theta_end: 0.1         # target lambda after warmup
-  lambda_theta_warmup_epochs: 20  # increased from 10 for dense training stability
+  lambda_theta_warmup_epochs: 5   # 5: ramp starts ep6 → useful signal before early stop
   lambda_theta_schedule: "delayed"  # CHANGED: "delayed" recommended for stride=5
   huber_delta: 0.1
 
