@@ -1,5 +1,8 @@
 # CycleLayerNet v0 (Brayton physics) and v1 (multi-task health params)
 #
+# !! GPU config — stride_train=5, num_workers=4, stride_eval=1 !!
+# On CPU this takes ~20 min.  Use cpu_cyclelayer.yaml for a ~5-min first test.
+#
 # model.type:
 #   "cyclelayer"    – v0: Encoder -> BraytonCycleLayer -> PrognosticsHead
 #   "cyclelayer_v1" – v1: Encoder -> theta_hat -> PrognosticsHead (multi-task)

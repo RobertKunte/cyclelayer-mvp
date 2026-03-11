@@ -17,8 +17,8 @@ TensorBoard tag layout
         val_epoch             -- total val loss per epoch
         train_{k}_epoch       -- component k (rul, theta, …) train per epoch
         val_{k}_epoch         -- component k val per epoch
-        train_step            -- total train loss per step
-        {k}_step              -- component k per step
+        train_step            -- total train loss per step  [opt-in: tb_log_every_n_steps]
+        {k}_step              -- component k per step       [opt-in: tb_log_every_n_steps]
 
     Val/                      -- per-epoch prediction plausibility (val set)
         mae                   -- mean absolute error
@@ -156,6 +156,12 @@ class Trainer:
         self.best_val_loss = float("inf")
         self.epochs_without_improvement = 0
         self.global_step = 0
+
+        # Per-step TensorBoard logging: 0 = disabled (default, fast).
+        # Set tb_log_every_n_steps: 50 in the YAML to log step-level curves.
+        # WARNING: small values (e.g. 1) create huge event files and add
+        # significant overhead on network-mounted storage (Google Drive, NFS).
+        self._tb_log_step: int = int(config.get("tb_log_every_n_steps", 0))
 
     # ------------------------------------------------------------------
     # Loss construction
@@ -350,7 +356,9 @@ class Trainer:
         total_bias = 0.0
         n_batches  = 0
 
-        pbar = tqdm(self.train_loader, desc=f"Train {epoch}", leave=False)
+        # mininterval=2s: redraw at most once every 2 s regardless of batch count.
+        # This prevents 2000+ Jupyter HTML renders per epoch which add ~5 min on T4.
+        pbar = tqdm(self.train_loader, desc=f"Train {epoch}", leave=False, mininterval=2.0)
         for batch in pbar:
             batch = [t.to(self.device) if isinstance(t, torch.Tensor) else t for t in batch]
             self.optimizer.zero_grad(set_to_none=True)
@@ -383,10 +391,13 @@ class Trainer:
             n_batches  += 1
 
             self.global_step += 1
-            self.writer.add_scalar("Loss/train_step",         loss.item(),              self.global_step)
-            self.writer.add_scalar("GradNorm/train_step",     grad_norm_tensor.item(),  self.global_step)
-            for k, v in components.items():
-                self.writer.add_scalar(f"Loss/{k}_step",      v.item(),                 self.global_step)
+            # Per-step TB logging is gated to avoid thousands of writes per epoch.
+            # Enabled only when tb_log_every_n_steps > 0 in config.
+            if self._tb_log_step > 0 and (self.global_step % self._tb_log_step == 0):
+                self.writer.add_scalar("Loss/train_step",     loss.item(),             self.global_step)
+                self.writer.add_scalar("GradNorm/train_step", grad_norm_tensor.item(), self.global_step)
+                for k, v in components.items():
+                    self.writer.add_scalar(f"Loss/{k}_step",  v.item(),                self.global_step)
             pbar.set_postfix(
                 loss=f"{loss.item():.4f}",
                 gnorm=f"{grad_norm_tensor.item():.2f}",

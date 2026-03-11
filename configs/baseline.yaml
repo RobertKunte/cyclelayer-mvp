@@ -1,5 +1,8 @@
 # Baseline model configuration (CNN or LSTM, plain or +theta_true upper bound)
 #
+# !! GPU config — stride_train=5, num_workers=4, stride_eval=1 !!
+# On CPU this takes ~20 min.  Use cpu_baseline.yaml for a ~5-min first test.
+#
 # model.type options:
 #   "cnn"        – plain CNN baseline
 #   "cnn_theta"  – CNN + theta_true concatenated (upper bound, Phase 1)

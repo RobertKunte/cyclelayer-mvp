@@ -236,13 +236,17 @@ def main() -> None:
         f"train={len(train_ds):,}  val={len(val_ds):,} windows"
     )
 
+    n_workers = d.get("num_workers", 0)
+    # persistent_workers avoids respawning subprocesses between epochs on Linux/Colab
+    # (saves ~0.5s/epoch with num_workers=4).  Must be False when num_workers=0.
+    persist = n_workers > 0
     train_loader = DataLoader(
         train_ds, batch_size=d["batch_size"], shuffle=True,
-        num_workers=d.get("num_workers", 0), pin_memory=True,
+        num_workers=n_workers, pin_memory=True, persistent_workers=persist,
     )
     val_loader = DataLoader(
         val_ds, batch_size=d["batch_size"] * 2, shuffle=False,
-        num_workers=d.get("num_workers", 0), pin_memory=True,
+        num_workers=n_workers, pin_memory=True, persistent_workers=persist,
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────

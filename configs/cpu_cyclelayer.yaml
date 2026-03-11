@@ -1,19 +1,29 @@
-# CPU-friendly cyclelayer_v1 config — stride_train=200, num_workers=0
+# CPU first-test config for cyclelayer_v1 — target: ~5 min on a modern laptop
+#
+# Why this is fast vs cyclelayer.yaml:
+#   stride_train 5→50    :  10x fewer train batches/epoch   (~160k vs ~534k windows)
+#   stride_eval  1→100   :  100x fewer val windows/epoch    (7k vs 670k windows)
+#   num_workers  4→0     :  no Windows process-spawn overhead (~3-5s saved/epoch)
+#   batch_size 256→512   :  2x fewer gradient steps/epoch
+#   epochs      50→25    :  shorter run (early-stop patience still applies)
+#
+# Use cyclelayer.yaml (+ GPU) for full research runs.
+# Reuses splits from the standard run if they exist.
 
 seed: 42
 
 data:
   hdf5_path: "data/NCMAPSS/N-CMAPSS_DS01-005.h5"
   window_size: 30
-  stride_train: 200             # ~17k train windows  (~4s/epoch on CPU)
-  stride_eval: 50               # ~30k eval windows   (~2s eval on CPU)
+  stride_train: 50          # ~160k train windows   (~6s/epoch on CPU)
+  stride_eval: 100          # ~7k val windows       (<1s eval on CPU)
   use_virtual_sensors: false
   val_split: 0.15
   test_split: 0.15
-  batch_size: 256
-  num_workers: 0
+  batch_size: 512           # 2x larger → half the gradient steps
+  num_workers: 0            # CRITICAL: 0 avoids Windows spawn overhead
   max_rul: 99
-  split_dir: "splits/N-CMAPSS_DS01-005"   # reuse splits from Case A
+  split_dir: "splits/N-CMAPSS_DS01-005"
 
 model:
   type: "cyclelayer_v1"
@@ -34,23 +44,23 @@ model:
   cp: 1005.0
 
 training:
-  epochs: 50
-  lr: 1.0e-3                    # 1e-3 OK for CPU sparse runs (stride=200)
+  epochs: 25
+  lr: 1.0e-3                # 1e-3 is fine for stride=50 (sparse enough)
   weight_decay: 1.0e-4
   mse_weight: 1.0
   asymmetry: 0.5
 
-  grad_clip_norm: 1.0           # gradient clipping; set 0/null to disable
+  grad_clip_norm: 1.0
 
   lambda_theta_start: 1.0
   lambda_theta_end: 0.1
-  lambda_theta_warmup_epochs: 10
-  lambda_theta_schedule: "step" # "step" is fine for sparse stride
+  lambda_theta_warmup_epochs: 5   # short warmup for quick test
+  lambda_theta_schedule: "step"   # "step" is stable for sparse stride
   huber_delta: 0.1
 
   use_physics_loss: false
-  use_amp: false
-  early_stopping_patience: 15
+  use_amp: false            # AMP only helps on CUDA — disable for CPU
+  early_stopping_patience: 8
   output_dir: "runs/cpu_cyclelayer_v1"
 
 evaluation:
