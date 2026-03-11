@@ -35,15 +35,17 @@ model:
 
 training:
   epochs: 50
-  lr: 1.0e-3
+  lr: 1.0e-3                    # 1e-3 OK for CPU sparse runs (stride=200)
   weight_decay: 1.0e-4
   mse_weight: 1.0
   asymmetry: 0.5
 
+  grad_clip_norm: 1.0           # gradient clipping; set 0/null to disable
+
   lambda_theta_start: 1.0
   lambda_theta_end: 0.1
   lambda_theta_warmup_epochs: 10
-  lambda_theta_schedule: "step"
+  lambda_theta_schedule: "step" # "step" is fine for sparse stride
   huber_delta: 0.1
 
   use_physics_loss: false

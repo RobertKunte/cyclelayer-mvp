@@ -34,11 +34,12 @@ model:
 
 training:
   epochs: 50
-  lr: 1.0e-3
+  lr: 1.0e-3                    # 1e-3 OK for sparse CPU runs (stride=200)
   weight_decay: 1.0e-4
   mse_weight: 1.0
   asymmetry: 0.5
   lambda_theta: 0.0
+  grad_clip_norm: 1.0           # gradient clipping; 0/null to disable
   use_amp: false                # no CUDA AMP on CPU
   early_stopping_patience: 15
   output_dir: "runs/cpu_baseline"

@@ -46,17 +46,27 @@ model:
 # ── Training ──────────────────────────────────────────────────────────────────
 training:
   epochs: 50
-  lr: 1.0e-3
+  lr: 3.0e-4                    # recommended: 3e-4 for dense training (stride=5)
+                                # use 1e-3 only for very sparse stride (>=100)
   weight_decay: 1.0e-4
   mse_weight: 1.0
   asymmetry: 0.5
 
+  # Gradient clipping (highly recommended for stability with dense training)
+  # Set to 0 or null to disable.  1.0 is a safe default; reduce to 0.5 if
+  # val loss still explodes after epoch 5.
+  grad_clip_norm: 1.0
+
   # Multi-task theta supervision (v1 only; ignored for v0)
-  # Schedule: start high for strong early supervision, then relax
-  lambda_theta_start: 1.0       # lambda at epoch 1 (high supervision)
-  lambda_theta_end: 0.1         # lambda after warmup (relaxed)
-  lambda_theta_warmup_epochs: 10  # epochs to stay at start value (step schedule)
-  lambda_theta_schedule: "step" # "step" or "linear"
+  # "delayed" schedule is best for stride_train=5: lets the RUL head converge
+  # for warmup epochs before theta supervision kicks in, avoiding early spikes.
+  # "step": stay at start for warmup epochs, then jump to end
+  # "linear": linearly interpolate start->end over warmup epochs
+  # "delayed": 0 for warmup epochs, then ramp 0->end over next warmup epochs
+  lambda_theta_start: 1.0       # lambda at epoch 1 (step/linear); ignored by "delayed"
+  lambda_theta_end: 0.1         # target lambda after warmup
+  lambda_theta_warmup_epochs: 20  # increased from 10 for dense training stability
+  lambda_theta_schedule: "delayed"  # CHANGED: "delayed" recommended for stride=5
   huber_delta: 0.1
 
   # Physics penalties (v0 PhysicsInformedLoss; ignored when lambda_theta > 0)

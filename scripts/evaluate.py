@@ -30,7 +30,12 @@ if str(_ROOT) not in sys.path:
 
 from cyclelayer.data.ncmapss import NCMAPSSDataset
 from cyclelayer.data.splits import load_splits, splits_exist
-from cyclelayer.evaluation.metrics import evaluate_all, prediction_horizon
+from cyclelayer.evaluation.metrics import (
+    evaluate_all,
+    ph_debug_stats,
+    prediction_horizon,
+    s_score_samples,
+)
 from scripts.train import build_model
 
 logging.basicConfig(
@@ -94,7 +99,7 @@ def main() -> None:
         else:
             logger.warning("No split file found; evaluating all dev units.")
 
-    # ── Dataset — use stride_eval (default 1) for full per-unit trajectories ──
+    # Dataset — use stride_eval (default 1) for full per-unit trajectories
     stride_eval = d.get("stride_eval", 1)
     dataset = NCMAPSSDataset(
         hdf5_path=hdf5_path,
@@ -112,54 +117,126 @@ def main() -> None:
         num_workers=d.get("num_workers", 0),
     )
 
-    # ── Model ─────────────────────────────────────────────────────────────────
+    # Model
     model = build_model(cfg, dataset.n_features, dataset.n_health_params).to(device)
     ckpt_path = args.checkpoint or cfg["evaluation"]["checkpoint"]
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
     logger.info(f"Loaded checkpoint: {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
 
-    # ── Inference ─────────────────────────────────────────────────────────────
+    # Inference
     preds, targets = run_inference(model, loader, device)
-    unit_ids = dataset.unit_ids_array   # aligned with preds (shuffle=False)
+    unit_ids       = dataset.unit_ids_array   # aligned with preds (shuffle=False)
+    unique_units   = np.unique(unit_ids)
+    n_samples      = len(preds)
 
-    # ── Global metrics ────────────────────────────────────────────────────────
+    # Global metrics
     global_metrics = evaluate_all(preds, targets)
-    logger.info(f"RMSE    : {global_metrics['rmse']:.4f}")
-    logger.info(f"S-score : {global_metrics['s_score']:.2f}")
+    s_sum          = global_metrics["s_score"]
+    # s_score_mean divides by the number of windows, making it comparable
+    # across experiments with different strides.  s_score_sum is the raw PHM'08
+    # figure and grows linearly with N_samples, so it's unreliable for comparisons.
+    s_mean         = s_sum / n_samples if n_samples > 0 else float("nan")
 
-    # ── Per-unit prediction horizon ───────────────────────────────────────────
-    alpha = cfg["evaluation"].get("alpha", 0.2)
-    ph_values: list[float] = []
-    ph_none_count = 0
-    unique_units = np.unique(unit_ids)
+    logger.info(f"RMSE         : {global_metrics['rmse']:.4f}")
+    logger.info(f"S-score sum  : {s_sum:.2f}   (N={n_samples:,})")
+    logger.info(f"S-score mean : {s_mean:.6f}  (per-window; stride-invariant)")
+
+    # Per-unit loop: PH, S-score mean, and PH debug stats
+    alpha   = cfg["evaluation"].get("alpha", 0.2)
+    ph_ks   = (50, 100, 200)  # frac_within_alpha_lastK breakpoints
+
+    ph_values:             list[float]       = []
+    ph_none_count:         int               = 0
+    per_unit_s_mean:       list[float]       = []
+    per_unit_debug:        list[dict]        = []
+    per_unit_summary:      list[dict]        = []  # for logging
 
     for uid in unique_units:
-        mask = unit_ids == uid
-        ph = prediction_horizon(preds[mask], targets[mask], alpha=alpha)
+        mask  = unit_ids == uid
+        p_u   = preds[mask]
+        t_u   = targets[mask]
+
+        # Prediction horizon
+        ph = prediction_horizon(p_u, t_u, alpha=alpha)
         if ph is None:
             ph_none_count += 1
         else:
             ph_values.append(float(ph))
 
+        # Per-unit S-score mean (not sum): stride-invariant, fair per-engine comparison
+        s_samp = s_score_samples(p_u, t_u)
+        per_unit_s_mean.append(float(np.mean(s_samp)))
+
+        # PH diagnostic stats
+        dbg = ph_debug_stats(p_u, t_u, alpha=alpha, ks=ph_ks)
+        per_unit_debug.append(dbg)
+
+        per_unit_summary.append({
+            "unit_id":  int(uid),
+            "ph":       ph,
+            "s_mean":   float(np.mean(s_samp)),
+            "max_err":  dbg["max_abs_error"],
+            "p95_err":  dbg["p95_abs_error"],
+            "frac50":   dbg["frac_within_alpha_last50"],
+        })
+
+    # Aggregate PH stats
     ph_median = float(np.median(ph_values)) if ph_values else float("nan")
     ph_p10    = float(np.percentile(ph_values, 10)) if ph_values else float("nan")
     ph_p90    = float(np.percentile(ph_values, 90)) if ph_values else float("nan")
 
     logger.info(
-        f"Prediction horizon (alpha={alpha})  "
+        f"PH (alpha={alpha})  "
         f"median={ph_median:.1f}  p10={ph_p10:.1f}  p90={ph_p90:.1f}  "
         f"none={ph_none_count}/{len(unique_units)} units"
     )
 
-    # ── Save metrics.json ─────────────────────────────────────────────────────
+    # Aggregate per-unit S-score stats
+    # Median of per-unit means is a robust summary that won't blow up if one unit
+    # has many windows.  p10/p90 show spread.
+    s_unit_median = float(np.median(per_unit_s_mean)) if per_unit_s_mean else float("nan")
+    s_unit_p10    = float(np.percentile(per_unit_s_mean, 10)) if per_unit_s_mean else float("nan")
+    s_unit_p90    = float(np.percentile(per_unit_s_mean, 90)) if per_unit_s_mean else float("nan")
+
+    logger.info(
+        f"S-score (per-unit mean)  "
+        f"median={s_unit_median:.4f}  p10={s_unit_p10:.4f}  p90={s_unit_p90:.4f}"
+    )
+
+    # Aggregate PH debug stats across units
+    ph_debug_agg: dict[str, float] = {}
+    for k in ph_ks:
+        key  = f"frac_within_alpha_last{k}"
+        vals = [d[key] for d in per_unit_debug]
+        ph_debug_agg[f"ph_{key}_median"] = float(np.median(vals))
+        logger.info(f"  frac_within_alpha_last{k:3d}  median={ph_debug_agg[f'ph_{key}_median']:.3f}")
+
+    max_err_vals = [d["max_abs_error"] for d in per_unit_debug]
+    p95_err_vals = [d["p95_abs_error"] for d in per_unit_debug]
+    ph_debug_agg["max_abs_error_unit_median"] = float(np.median(max_err_vals))
+    ph_debug_agg["p95_abs_error_unit_median"] = float(np.median(p95_err_vals))
+
+    # Per-unit summary table to log
+    logger.info("Per-unit breakdown:")
+    logger.info(f"  {'unit':>4}  {'ph':>6}  {'s_mean':>9}  {'max_err':>8}  {'frac@50':>8}")
+    for row in per_unit_summary:
+        ph_str = f"{row['ph']:6.1f}" if row["ph"] is not None else "  None"
+        logger.info(
+            f"  {row['unit_id']:4d}  {ph_str}  "
+            f"{row['s_mean']:9.4f}  {row['max_err']:8.2f}  {row['frac50']:8.3f}"
+        )
+
+    # Save metrics.json
     out_path = Path(
         args.output or Path(t.get("output_dir", "runs/experiment")) / "metrics.json"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics = {
+
+    metrics: dict = {
+        # --- Standard metrics (keep existing keys for backward compat) ---
         "rmse":          global_metrics["rmse"],
-        "s_score":       global_metrics["s_score"],
+        "s_score":       s_sum,           # existing key name kept for consumers
         "ph_median":     ph_median,
         "ph_p10":        ph_p10,
         "ph_p90":        ph_p90,
@@ -168,12 +245,29 @@ def main() -> None:
         "split":         args.split,
         "checkpoint":    str(ckpt_path),
         "epoch":         ckpt.get("epoch"),
+
+        # --- Extended S-score fields ---
+        # s_score_sum == s_score (explicit alias).  s_score_mean is the key metric
+        # for cross-run comparisons because it does not scale with N_samples.
+        "s_score_sum":            s_sum,
+        "s_score_mean":           s_mean,
+        "n_samples":              n_samples,
+        # Per-unit means: more robust than per-window because each unit
+        # contributes equally regardless of trajectory length.
+        "s_score_unit_median_mean": s_unit_median,
+        "s_score_unit_p10_mean":    s_unit_p10,
+        "s_score_unit_p90_mean":    s_unit_p90,
+
+        # --- PH debug stats (aggregated across units) ---
+        # frac_within_alpha_lastK: if high + PH=None => mid-trajectory spike issue.
+        # max/p95 abs_error: scale of worst mistakes per unit.
+        **ph_debug_agg,
     }
     out_path.write_text(json.dumps(metrics, indent=2))
     logger.info(f"Metrics saved -> {out_path}")
 
-    # ── Export per-window predictions CSV ─────────────────────────────────────
-    time_index = np.zeros(len(preds), dtype=np.int64)
+    # Export per-window predictions CSV
+    time_index = np.zeros(n_samples, dtype=np.int64)
     for uid in unique_units:
         mask = unit_ids == uid
         time_index[mask] = np.arange(mask.sum())
@@ -188,7 +282,7 @@ def main() -> None:
     })
     pred_path = out_path.parent / "predictions.csv"
     pred_df.to_csv(pred_path, index=False)
-    logger.info(f"Predictions saved -> {pred_path}  ({len(pred_df):,} rows)")
+    logger.info(f"Predictions saved -> {pred_path}  ({n_samples:,} rows)")
 
 
 if __name__ == "__main__":
