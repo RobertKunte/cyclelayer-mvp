@@ -53,7 +53,7 @@ training:
                                 # use 1e-3 only for very sparse stride (>=100)
   weight_decay: 1.0e-4
   mse_weight: 1.0
-  asymmetry: 0.5
+  asymmetry: 0.1                # was 0.5; less downward bias on high-RUL predictions
 
   # Gradient clipping (highly recommended for stability with dense training)
   # Set to 0 or null to disable.  1.0 is a safe default; reduce to 0.5 if

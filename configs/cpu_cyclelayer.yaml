@@ -48,14 +48,16 @@ training:
   lr: 1.0e-3                # 1e-3 is fine for stride=50 (sparse enough)
   weight_decay: 1.0e-4
   mse_weight: 1.0
-  asymmetry: 0.5
+  asymmetry: 0.1                # was 0.5; 0.1 still penalises over-est. but less downward bias
 
   grad_clip_norm: 1.0
 
-  lambda_theta_start: 1.0
+  lambda_theta_start: 1.0         # ignored by "delayed" schedule
   lambda_theta_end: 0.1
-  lambda_theta_warmup_epochs: 5   # short warmup for quick test
-  lambda_theta_schedule: "step"   # "step" is stable for sparse stride
+  lambda_theta_warmup_epochs: 5   # "delayed": epochs 1-5 pure RUL, epochs 6-10 ramp 0→0.1
+  lambda_theta_schedule: "delayed" # IMPORTANT: lets RUL head converge before theta kicks in
+                                   # "step" at epoch 3 forces lambda=1.0 → theta dominates →
+                                   # encoder diverted → RUL head predicts near training mean (~60)
   huber_delta: 0.1
 
   use_physics_loss: false

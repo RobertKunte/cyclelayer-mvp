@@ -48,7 +48,7 @@ training:
   lr: 3.0e-4                    # 3e-4 recommended for dense training (stride=5)
   weight_decay: 1.0e-4
   mse_weight: 1.0
-  asymmetry: 0.5
+  asymmetry: 0.1                # was 0.5; less downward bias on high-RUL predictions
   lambda_theta: 0.0             # 0 = no theta supervision (pure RUL baseline)
   grad_clip_norm: 1.0           # gradient clipping L2 norm; 0/null to disable
   use_amp: true

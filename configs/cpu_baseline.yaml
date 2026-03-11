@@ -46,7 +46,7 @@ training:
   lr: 1.0e-3                # 1e-3 is fine for stride=50 (sparse enough)
   weight_decay: 1.0e-4
   mse_weight: 1.0
-  asymmetry: 0.5
+  asymmetry: 0.1                # was 0.5; 0.1 still penalises over-est. but less downward bias
   lambda_theta: 0.0
   grad_clip_norm: 1.0
   use_amp: false            # AMP only helps on CUDA — disable for CPU
