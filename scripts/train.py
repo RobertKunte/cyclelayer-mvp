@@ -38,7 +38,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from cyclelayer.data.ncmapss import NCMAPSSDataset, SubsetByUnit
-from cyclelayer.data.preprocessing import StandardScaler, fit_theta_scaler
+from cyclelayer.data.preprocessing import StandardScaler, fit_sensor_scaler, fit_theta_scaler
 from cyclelayer.data.splits import extract_unit_ids, load_splits, make_unit_splits, save_splits, splits_exist
 from cyclelayer.models.baselines import CNNBaseline, LSTMBaseline
 from cyclelayer.models.cycle_layer import CycleLayerNet, CycleLayerNetV1
@@ -192,18 +192,34 @@ def main() -> None:
         return_theta_true=needs_theta,
     )
 
+    output_dir = Path(t.get("output_dir", "runs/experiment"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Sensor normalization (train-split fit, applied to all rows) ────────────
+    # Sensors have very different scales (alt ≈ 35000 ft, Wf ≈ 300 pph, etc.).
+    # StandardScaler removes per-feature mean and variance so the CNN/LSTM sees
+    # unit-normal inputs, improving gradient flow and training stability.
+    n_train_rows = int(np.isin(base_ds._unit_id_arr, unit_splits["train"]).sum())
+    sensor_scaler = fit_sensor_scaler(base_ds, unit_splits["train"])
+    base_ds._sensors = sensor_scaler.transform(base_ds._sensors).astype(np.float32)
+    logger.info(
+        f"Sensor StandardScaler fitted on {n_train_rows} train rows, "
+        f"applied to all {len(base_ds._sensors)} rows."
+    )
+    np.savez(
+        output_dir / "sensor_scaler.npz",
+        mean=sensor_scaler.mean_,
+        std=sensor_scaler.std_,
+    )
+
     # ── Theta normalization (train-split fit, applied to all rows) ─────────────
     if needs_theta and base_ds._theta is not None:
         theta_scaler = fit_theta_scaler(base_ds, unit_splits["train"])
         base_ds._theta = theta_scaler.transform(base_ds._theta).astype(np.float32)
-        n_train_rows = int(np.isin(base_ds._unit_id_arr, unit_splits["train"]).sum())
         logger.info(
             f"Theta StandardScaler fitted on {n_train_rows} train rows, "
             f"applied to {len(base_ds._theta)} total rows."
         )
-        # Save scaler for use in evaluate.py / run_louo.py
-        output_dir = Path(t.get("output_dir", "runs/experiment"))
-        output_dir.mkdir(parents=True, exist_ok=True)
         np.savez(
             output_dir / "theta_scaler.npz",
             mean=theta_scaler.mean_,

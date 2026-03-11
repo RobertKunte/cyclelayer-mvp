@@ -18,7 +18,7 @@ import pytest
 
 # Re-use the synthetic dataset factory from test_dataset.py
 from tests.test_dataset import _make_synthetic_dataset
-from cyclelayer.data.preprocessing import StandardScaler, fit_theta_scaler
+from cyclelayer.data.preprocessing import StandardScaler, fit_sensor_scaler, fit_theta_scaler
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +127,55 @@ def test_theta_scaler_different_train_sets_differ():
 
 
 # ---------------------------------------------------------------------------
-# 4. predictions.csv expected columns
+# 5. Sensor scaler no leakage
+# ---------------------------------------------------------------------------
+
+def test_sensor_scaler_only_uses_train_rows():
+    """Sensor scaler fitted on train units must NOT include val/test stats."""
+    # Sensor values differ per unit: unit u has sensors = u (constant for all features)
+    unit_counts = {1: 30, 2: 30, 3: 30}
+    ds = _make_synthetic_dataset(unit_counts, window_size=5, n_features=4)
+
+    # Verify sensors are unit-specific: row sensor value = uid + t*0.01 ≈ uid for small t
+    scaler = fit_sensor_scaler(ds, train_units=[1])
+    # Unit 1 sensors start at 1.0, so mean should be ≈ 1.15 (1.0 + 29*0.01/2)
+    # The mean of unit 2 rows is ≈ 2.15, unit 3 ≈ 3.15
+    # Global mean of all 3 units would be ≈ 2.15 — clearly different from unit-1-only mean
+    global_mean_approx = 2.15
+    assert not np.allclose(scaler.mean_, global_mean_approx, atol=0.2), (
+        "Sensor scaler mean matches global mean — val/test rows may have leaked"
+    )
+    # Unit-1-only mean should be close to 1.15
+    np.testing.assert_allclose(scaler.mean_, 1.145, atol=0.05)
+
+
+def test_sensor_scaler_raises_on_empty_train_mask():
+    """fit_sensor_scaler must raise ValueError when no rows match train_units."""
+    ds = _make_synthetic_dataset({1: 20, 2: 20}, window_size=5, n_features=4)
+    with pytest.raises(ValueError, match="No rows found"):
+        fit_sensor_scaler(ds, train_units=[99])
+
+
+def test_sensor_scaler_deterministic():
+    """Calling fit_sensor_scaler twice with the same units yields identical stats."""
+    ds = _make_synthetic_dataset({1: 30, 2: 30, 3: 30}, window_size=5, n_features=4)
+    s1 = fit_sensor_scaler(ds, [1, 2])
+    s2 = fit_sensor_scaler(ds, [1, 2])
+    np.testing.assert_array_equal(s1.mean_, s2.mean_)
+    np.testing.assert_array_equal(s1.std_, s2.std_)
+
+
+def test_sensor_scaler_transform_normalises_train_mean():
+    """After transform, train rows should have near-zero mean."""
+    ds = _make_synthetic_dataset({1: 50, 2: 50}, window_size=5, n_features=4)
+    scaler = fit_sensor_scaler(ds, train_units=[1, 2])
+    normed = scaler.transform(ds._sensors)
+    # All rows are train rows here; after standardization mean ≈ 0
+    np.testing.assert_allclose(normed.mean(axis=0), 0.0, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# 6. predictions.csv expected columns
 # ---------------------------------------------------------------------------
 
 def test_predictions_csv_columns():

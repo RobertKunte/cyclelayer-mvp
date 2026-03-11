@@ -114,6 +114,33 @@ def normalize(
 # Theta scaler helper
 # ---------------------------------------------------------------------------
 
+def fit_sensor_scaler(
+    dataset: "NCMAPSSDataset | Any",
+    train_units: list[int],
+) -> StandardScaler:
+    """Fit a StandardScaler on sensor inputs using only train-split rows.
+
+    Prevents data leakage: val and test sensor rows are never seen during fit.
+
+    Args:
+        dataset: NCMAPSSDataset with _sensors (N, n_features) and
+                 _unit_id_arr (N,) populated.
+        train_units: Unit IDs whose rows are used for fitting.
+
+    Returns:
+        Fitted StandardScaler (not yet applied to the dataset).
+
+    Example::
+
+        scaler = fit_sensor_scaler(base_ds, unit_splits["train"])
+        base_ds._sensors = scaler.transform(base_ds._sensors).astype(np.float32)
+    """
+    mask = np.isin(dataset._unit_id_arr, train_units)
+    if mask.sum() == 0:
+        raise ValueError(f"No rows found for train_units={train_units}.")
+    return StandardScaler().fit(dataset._sensors[mask])
+
+
 def fit_theta_scaler(
     dataset: "NCMAPSSDataset | Any",
     train_units: list[int],

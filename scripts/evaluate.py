@@ -46,6 +46,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _ema_smooth(preds: np.ndarray, alpha: float) -> np.ndarray:
+    """Apply causal exponential moving average along the first axis.
+
+    EMA(t) = alpha * pred(t) + (1 - alpha) * EMA(t-1)
+    alpha=1.0 → no smoothing (identity); alpha→0 → heavy smoothing.
+    """
+    if alpha >= 1.0:
+        return preds
+    out = preds.copy()
+    for i in range(1, len(out)):
+        out[i] = alpha * preds[i] + (1.0 - alpha) * out[i - 1]
+    return out
+
+
 @torch.no_grad()
 def run_inference(
     model: torch.nn.Module,
@@ -73,6 +87,12 @@ def main() -> None:
     parser.add_argument("--device", default=None)
     parser.add_argument("--split", default="test", choices=["dev", "test"])
     parser.add_argument("--output", default=None, help="Override output path for metrics.json.")
+    parser.add_argument(
+        "--ema_alpha", type=float, default=1.0,
+        help="EMA smoothing factor applied per-unit to predictions before metrics "
+             "(1.0 = no smoothing, 0.3 = moderate, 0.1 = heavy). "
+             "Reduces mid-trajectory spikes; does not affect raw predictions.csv.",
+    )
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -118,11 +138,26 @@ def main() -> None:
     )
 
     # Model
-    model = build_model(cfg, dataset.n_features, dataset.n_health_params).to(device)
     ckpt_path = args.checkpoint or cfg["evaluation"]["checkpoint"]
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    model = build_model(cfg, dataset.n_features, dataset.n_health_params).to(device)
     model.load_state_dict(ckpt["model"])
     logger.info(f"Loaded checkpoint: {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
+
+    # Apply sensor scaler if one was saved alongside the checkpoint
+    ckpt_dir = Path(ckpt_path).parent
+    sensor_scaler_path = ckpt_dir / "sensor_scaler.npz"
+    if sensor_scaler_path.exists():
+        sc = np.load(sensor_scaler_path)
+        sc_mean, sc_std = sc["mean"], sc["std"]
+        sc_std_safe = np.where(sc_std == 0, 1.0, sc_std)
+        dataset._sensors = ((dataset._sensors - sc_mean) / sc_std_safe).astype(np.float32)
+        logger.info(f"Sensor scaler applied from {sensor_scaler_path}")
+    else:
+        logger.warning(
+            f"No sensor_scaler.npz found at {sensor_scaler_path} — using raw sensors. "
+            "Predictions may be poor if the model was trained with normalization."
+        )
 
     # Inference
     preds, targets = run_inference(model, loader, device)
@@ -145,6 +180,9 @@ def main() -> None:
     # Per-unit loop: PH, S-score mean, and PH debug stats
     alpha   = cfg["evaluation"].get("alpha", 0.2)
     ph_ks   = (50, 100, 200)  # frac_within_alpha_lastK breakpoints
+    ema_alpha = args.ema_alpha
+    if ema_alpha < 1.0:
+        logger.info(f"EMA smoothing enabled: alpha={ema_alpha}")
 
     ph_values:             list[float]       = []
     ph_none_count:         int               = 0
@@ -154,7 +192,7 @@ def main() -> None:
 
     for uid in unique_units:
         mask  = unit_ids == uid
-        p_u   = preds[mask]
+        p_u   = _ema_smooth(preds[mask], ema_alpha)
         t_u   = targets[mask]
 
         # Prediction horizon
@@ -242,6 +280,7 @@ def main() -> None:
         "ph_p90":        ph_p90,
         "ph_none_count": ph_none_count,
         "alpha":         alpha,
+        "ema_alpha":     ema_alpha,
         "split":         args.split,
         "checkpoint":    str(ckpt_path),
         "epoch":         ckpt.get("epoch"),

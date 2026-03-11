@@ -7,9 +7,11 @@ constrain_output=True  (default, Brayton mode):
     Requires n_theta >= 5, layout [T1, pi, T3, eta_c, eta_t, ...].
 
 constrain_output=False  (health-param mode, Phase 2):
-    Applies sigmoid element-wise -> outputs in (0, 1).
-    For supervised regression against normalised health parameters
-    (T_dev in N-CMAPSS: fan/LPC/HPC/HPT/LPT efficiency & flow modifiers).
+    Returns raw MLP output (linear activation) — no sigmoid.
+    Targets are StandardScaler-normalised health parameters (z-scores,
+    typically in [-3, 3]). Using sigmoid here would restrict outputs to
+    (0, 1) and make the Huber loss unminimisable, causing the encoder to
+    saturate at ~0.5 and the RUL head to predict a constant.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ class SensorEncoder(nn.Module):
         mlp_hidden: Hidden size of the MLP projection head.
         dropout: Dropout probability applied before the MLP.
         constrain_output: If True, apply Brayton physical constraints.
-            If False, apply sigmoid for bounded (0, 1) health-param output.
+            If False, return raw linear output (for z-scored health params).
     """
 
     def __init__(
@@ -87,7 +89,7 @@ class SensorEncoder(nn.Module):
         raw = self.mlp(h)                    # (B, n_theta)
         if self.constrain_output:
             return self._constrain_brayton(raw)
-        return torch.sigmoid(raw)            # (0, 1) for health params
+        return raw                           # linear; matches z-scored targets
 
     # ------------------------------------------------------------------
 
