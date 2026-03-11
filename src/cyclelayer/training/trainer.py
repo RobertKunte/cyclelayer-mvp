@@ -143,7 +143,13 @@ class Trainer:
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=n_epochs, eta_min=lr * 0.01)
 
         self.use_amp = config.get("use_amp", True) and self.device.type == "cuda"
-        self.scaler = torch.amp.GradScaler(enabled=self.use_amp)
+        # init_scale=1024 (vs default 65536): 64× lower initial loss scaling →
+        # much less float16 overflow → fewer NaN/inf gradient steps in early epochs.
+        # growth_interval=100: rescale every 100 clean steps (default 2000 is too slow
+        # for 1338 batches/epoch; this lets the scale recover quickly after overflow).
+        self.scaler = torch.amp.GradScaler(
+            init_scale=1024, growth_interval=100, enabled=self.use_amp
+        )
 
         # Gradient clipping: configurable max L2 norm.
         # Default 1.0 — important for stability with dense training (stride=5).

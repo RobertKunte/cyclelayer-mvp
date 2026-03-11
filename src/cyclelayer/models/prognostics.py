@@ -12,6 +12,7 @@ Design choices:
 from __future__ import annotations
 
 import torch.nn as nn
+import torch.nn.init as init
 from torch import Tensor
 
 
@@ -54,6 +55,15 @@ class PrognosticsHead(nn.Module):
             nn.Softplus(),   # output > 0
         ]
         self.net = nn.Sequential(*layers)
+
+        # Initialise the final linear so Softplus output ≈ max_rul/2 at epoch 0.
+        # Softplus(b) ≈ b for b >> 1, so setting bias = max_rul/2 ≈ 49.5 means
+        # initial predictions cluster near the RUL midpoint, reducing epoch-1 MSE
+        # from ~2400 → ~820 and proportionally shrinking the raw gradient norm.
+        if max_rul is not None:
+            final_linear: nn.Linear = self.net[-2]  # type: ignore[assignment]
+            init.xavier_uniform_(final_linear.weight)
+            init.constant_(final_linear.bias, max_rul / 2.0)
 
     # ------------------------------------------------------------------
 

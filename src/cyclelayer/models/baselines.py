@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.init as init
 from torch import Tensor
 
 
@@ -71,6 +72,9 @@ class CNNBaseline(nn.Module):
             nn.Linear(mlp_hidden, 1),
             nn.Softplus(),
         )
+        if max_rul is not None:
+            init.xavier_uniform_(self.head[-2].weight)
+            init.constant_(self.head[-2].bias, max_rul / 2.0)
 
     def forward(self, x: Tensor, theta_true: Tensor | None = None) -> Tensor:
         """Args:
@@ -141,6 +145,9 @@ class LSTMBaseline(nn.Module):
             nn.Linear(mlp_hidden, 1),
             nn.Softplus(),
         )
+        if max_rul is not None:
+            init.xavier_uniform_(self.head[-2].weight)
+            init.constant_(self.head[-2].bias, max_rul / 2.0)
 
     def forward(self, x: Tensor, theta_true: Tensor | None = None) -> Tensor:
         """Args:
