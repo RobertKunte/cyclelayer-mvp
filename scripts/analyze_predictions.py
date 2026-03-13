@@ -58,7 +58,20 @@ def _plot_unit_trajectory(df_unit: pd.DataFrame, uid: int, out_dir: Path) -> Non
     ax1.plot(df_unit["time_index"], df_unit["y_true_rul"],
              label="y_true", color="steelblue", linewidth=1.5)
     ax1.plot(df_unit["time_index"], df_unit["y_pred_rul"],
-             label="y_pred", color="darkorange", linewidth=1.2, alpha=0.85)
+             label="y_pred (window)", color="darkorange", linewidth=1.0, alpha=0.55)
+
+    # Cycle-averaged prediction line (Chao 2022 Eq. 9) — present when cycle_id column exists
+    if "cycle_id" in df_unit.columns:
+        cy = (
+            df_unit.groupby("cycle_id")
+            .agg(t=("time_index", "mean"), p=("y_pred_rul", "mean"))
+            .reset_index()
+            .sort_values("t")
+        )
+        ax1.plot(cy["t"], cy["p"],
+                 label="y_pred (cycle avg)", color="black",
+                 linewidth=1.8, zorder=5)
+
     ax1.set_ylabel("RUL (cycles)")
     ax1.set_title(f"Unit {uid}  —  RUL trajectory  "
                   f"({len(df_unit):,} windows)")

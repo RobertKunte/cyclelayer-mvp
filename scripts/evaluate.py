@@ -302,10 +302,22 @@ def main() -> None:
         # max/p95 abs_error: scale of worst mistakes per unit.
         **ph_debug_agg,
     }
-    out_path.write_text(json.dumps(metrics, indent=2))
-    logger.info(f"Metrics saved -> {out_path}")
+    # metrics.json is written at the end of main() after cycle-avg metrics
+    # are appended — see the bottom of this function.
+    logger.info(f"Metrics will be saved -> {out_path}")
 
-    # Export per-window predictions CSV
+    # Build cycle_id array: for each window i, take the cycle of its last sample.
+    # dataset._index_list[i] = (uid, w_start); last HDF5 row = unit_start + w_start
+    # + window_size - 1.  Vectorised to avoid a Python loop over millions of windows.
+    _uid_arr  = np.array([uid for uid, _  in dataset._index_list], dtype=np.int32)
+    _ws_arr   = np.array([ws  for _,   ws in dataset._index_list], dtype=np.int64)
+    _unit_starts = np.array(
+        [dataset._unit_ranges[uid][0] for uid in _uid_arr], dtype=np.int64
+    )
+    _global_rows  = _unit_starts + _ws_arr + dataset.window_size - 1
+    cycle_ids_all = dataset._cycle_arr[_global_rows].astype(np.int32)
+
+    # Export per-window predictions CSV (cycle_id added for cycle-avg eval)
     time_index = np.zeros(n_samples, dtype=np.int64)
     for uid in unique_units:
         mask = unit_ids == uid
@@ -313,6 +325,7 @@ def main() -> None:
 
     pred_df = pd.DataFrame({
         "unit_id":    unit_ids.astype(np.int32),
+        "cycle_id":   cycle_ids_all,
         "time_index": time_index,
         "y_true_rul": targets.astype(np.float32),
         "y_pred_rul": preds.astype(np.float32),
@@ -322,6 +335,36 @@ def main() -> None:
     pred_path = out_path.parent / "predictions.csv"
     pred_df.to_csv(pred_path, index=False)
     logger.info(f"Predictions saved -> {pred_path}  ({n_samples:,} rows)")
+
+    # ── Cycle-averaged evaluation — Chao 2022, Eq. 9 ─────────────────────────
+    # y_hat_cycle[c] = (1/m_c) * Σ y_hat[j]  for all j in flight-cycle c
+    # Groups by (unit_id, cycle_id); true RUL is also averaged (constant within
+    # a cycle for N-CMAPSS, so the mean equals the single value).
+    df_cycle = (
+        pred_df.groupby(["unit_id", "cycle_id"])[["y_true_rul", "y_pred_rul"]]
+        .mean()
+        .reset_index()
+    )
+    n_cycles      = len(df_cycle)
+    cy_pred        = df_cycle["y_pred_rul"].values
+    cy_true        = df_cycle["y_true_rul"].values
+    rmse_cycle     = float(np.sqrt(np.mean((cy_pred - cy_true) ** 2)))
+    s_cycle_arr    = s_score_samples(cy_pred, cy_true)
+    s_score_cycle  = float(np.mean(s_cycle_arr))
+
+    cycle_pred_path = out_path.parent / "predictions_cycle.csv"
+    df_cycle.to_csv(cycle_pred_path, index=False)
+    logger.info(
+        f"Cycle-avg  RMSE={rmse_cycle:.4f}  S-score/cycle={s_score_cycle:.4f}  "
+        f"({n_cycles:,} cycles)  -> {cycle_pred_path}"
+    )
+
+    # Add cycle-avg metrics to the dict before writing metrics.json
+    metrics["rmse_cycle"]         = rmse_cycle
+    metrics["s_score_cycle_mean"] = s_score_cycle
+    metrics["n_cycles"]           = n_cycles
+    out_path.write_text(json.dumps(metrics, indent=2))
+    logger.info(f"Metrics saved -> {out_path}")
 
 
 if __name__ == "__main__":

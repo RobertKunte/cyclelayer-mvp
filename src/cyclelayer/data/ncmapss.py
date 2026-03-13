@@ -95,6 +95,7 @@ class NCMAPSSDataset(Dataset):
         self._rul: np.ndarray = np.empty(0)
         self._theta: np.ndarray | None = None
         self._unit_id_arr: np.ndarray = np.empty(0)
+        self._cycle_arr: np.ndarray = np.empty(0, dtype=np.int32)
         self._unit_ranges: dict[int, tuple[int, int]] = {}
         self._index_list: list[tuple[int, int]] = []
 
@@ -124,12 +125,14 @@ class NCMAPSSDataset(Dataset):
             )
 
         unit_ids_raw = A[:, 0].astype(np.int32)
+        cycle_ids_raw = A[:, 1].astype(np.int32)  # flight-cycle number per sample
 
         # Sort by (unit_id, cycle) -> each unit occupies a contiguous block
         order = np.lexsort((A[:, 1], unit_ids_raw))
         sensors      = sensors[order]
         rul          = rul[order]
         unit_ids_raw = unit_ids_raw[order]
+        cycle_ids_raw = cycle_ids_raw[order]
         if theta is not None:
             theta = theta[order]
 
@@ -137,6 +140,7 @@ class NCMAPSSDataset(Dataset):
         self._rul         = rul
         self._theta       = theta
         self._unit_id_arr = unit_ids_raw
+        self._cycle_arr   = cycle_ids_raw  # (N,) flight-cycle per row; used for cycle-avg eval
 
         unique_ids, counts = np.unique(unit_ids_raw, return_counts=True)
         cumsum = 0

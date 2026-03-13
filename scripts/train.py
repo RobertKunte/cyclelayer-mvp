@@ -74,12 +74,18 @@ def build_model(cfg: dict, n_features: int, n_health_params: int) -> torch.nn.Mo
     if model_type == "cyclelayer":
         mc_full = dict(mc)
         mc_full["n_features"] = n_features
+        # max_rul lives in cfg["data"], not cfg["model"], so inject it explicitly.
+        # Without this, from_config_dict uses the dataclass default of 125.0
+        # instead of the correct 99 for DS01 — causing a wrong output clamp AND
+        # a wrong initial bias (62.5 instead of 49.5) from our weight init.
+        mc_full.setdefault("max_rul", max_rul)
         return CycleLayerNet.from_config_dict(mc_full)
 
     if model_type == "cyclelayer_v1":
         mc_full = dict(mc)
         mc_full["n_features"] = n_features
         mc_full.setdefault("n_health_params", n_health_params)
+        mc_full.setdefault("max_rul", max_rul)  # same fix as above
         return CycleLayerNetV1.from_config_dict(mc_full)
 
     use_theta = model_type.endswith("_theta")
