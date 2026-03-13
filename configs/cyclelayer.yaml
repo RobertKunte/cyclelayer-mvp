@@ -21,6 +21,7 @@ data:
   batch_size: 256
   num_workers: 4
   max_rul: 99                   # DS01 RUL range is 0-99
+  use_ops: false                # set true to use separate ops encoder (ablation)
   # split_dir: "splits/N-CMAPSS_DS01-005"
 
 # ── Model ─────────────────────────────────────────────────────────────────────

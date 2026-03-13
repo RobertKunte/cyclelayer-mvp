@@ -63,9 +63,24 @@ class NCMAPSSDataset(Dataset):
         stride: Step size between successive windows (default 1).
         use_virtual_sensors: Concatenate X_v after X_s.
         units: Subset of integer unit IDs (None = all).
-        return_theta_true: If True, __getitem__ returns a 3-tuple
-            (x, rul, theta_true) instead of (x, rul).
+        return_theta_true: If True, __getitem__ includes theta_true in the tuple.
+        return_ops: If True, operating conditions (W, 4 cols) are returned as
+            a separate tensor and excluded from the main sensor tensor ``x``.
+            When False (default), W is prepended to X_s in ``x`` as before.
         dtype: Floating-point dtype for returned tensors.
+
+    Return tuple conventions
+    ------------------------
+    return_theta_true=False, return_ops=False:  (x, rul)                   2-tuple
+    return_theta_true=True,  return_ops=False:  (x, rul, theta_true)       3-tuple
+    return_theta_true=False, return_ops=True:   (x, rul, ops)              3-tuple *
+    return_theta_true=True,  return_ops=True:   (x, rul, theta_true, ops)  4-tuple
+
+    * ops is a (window_size, 4) tensor — the full ops time-series for the window.
+      x in this mode is X_s only (14 cols; n_features=14).
+
+    Note: Trainers/models must use ``getattr(model, 'ops_dim', 0) > 0`` to
+    distinguish between the 3-tuple(ops) and 3-tuple(theta) cases.
     """
 
     def __init__(
@@ -77,6 +92,7 @@ class NCMAPSSDataset(Dataset):
         use_virtual_sensors: bool = False,
         units: list[int] | None = None,
         return_theta_true: bool = False,
+        return_ops: bool = False,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
@@ -86,12 +102,14 @@ class NCMAPSSDataset(Dataset):
         self.stride = stride
         self.use_virtual_sensors = use_virtual_sensors
         self.return_theta_true = return_theta_true
+        self.return_ops = return_ops
         self.dtype = dtype
 
         if split not in ("dev", "test"):
             raise ValueError(f"split must be 'dev' or 'test', got '{split!r}'")
 
         self._sensors: np.ndarray = np.empty(0)
+        self._ops: np.ndarray = np.empty((0, 4), dtype=np.float32)  # W always stored
         self._rul: np.ndarray = np.empty(0)
         self._theta: np.ndarray | None = None
         self._unit_id_arr: np.ndarray = np.empty(0)
@@ -108,16 +126,25 @@ class NCMAPSSDataset(Dataset):
     def _load(self, units: list[int] | None) -> None:
         sfx = f"_{self.split}"
         with h5py.File(self.hdf5_path, "r") as f:
-            W   = f[f"W{sfx}"][:].astype(np.float32)
-            X_s = f[f"X_s{sfx}"][:].astype(np.float32)
+            W   = f[f"W{sfx}"][:].astype(np.float32)   # (N, 4) operating conditions
+            X_s = f[f"X_s{sfx}"][:].astype(np.float32)  # (N, 14) measured sensors
             rul = f[f"Y{sfx}"][:].ravel().astype(np.float32)
             A   = f[f"A{sfx}"][:].astype(np.float32)
 
-            if self.use_virtual_sensors:
-                X_v = f[f"X_v{sfx}"][:].astype(np.float32)
-                sensors = np.concatenate([W, X_s, X_v], axis=1)
+            if self.return_ops:
+                # Separate ops path: sensors = X_s only (W stored in _ops)
+                if self.use_virtual_sensors:
+                    X_v = f[f"X_v{sfx}"][:].astype(np.float32)
+                    sensors = np.concatenate([X_s, X_v], axis=1)  # (N, 28)
+                else:
+                    sensors = X_s.copy()  # (N, 14)
             else:
-                sensors = np.concatenate([W, X_s], axis=1)
+                # Legacy: W prepended to sensors (backward compatible)
+                if self.use_virtual_sensors:
+                    X_v = f[f"X_v{sfx}"][:].astype(np.float32)
+                    sensors = np.concatenate([W, X_s, X_v], axis=1)  # (N, 32)
+                else:
+                    sensors = np.concatenate([W, X_s], axis=1)  # (N, 18)
 
             theta_key = f"T{sfx}"
             theta: np.ndarray | None = (
@@ -129,14 +156,16 @@ class NCMAPSSDataset(Dataset):
 
         # Sort by (unit_id, cycle) -> each unit occupies a contiguous block
         order = np.lexsort((A[:, 1], unit_ids_raw))
-        sensors      = sensors[order]
-        rul          = rul[order]
-        unit_ids_raw = unit_ids_raw[order]
+        sensors       = sensors[order]
+        W             = W[order]
+        rul           = rul[order]
+        unit_ids_raw  = unit_ids_raw[order]
         cycle_ids_raw = cycle_ids_raw[order]
         if theta is not None:
             theta = theta[order]
 
         self._sensors     = sensors
+        self._ops         = W   # (N, 4) always stored; scaled separately when return_ops=True
         self._rul         = rul
         self._theta       = theta
         self._unit_id_arr = unit_ids_raw
@@ -174,10 +203,11 @@ class NCMAPSSDataset(Dataset):
         return len(self._index_list)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
-        """Return (x, rul) or (x, rul, theta_true) for sample ``idx``.
+        """Return a tuple for sample ``idx`` (see class docstring for conventions).
 
-        x shape: (window_size, n_features)
-        theta_true shape (when present): (n_health_params,)
+        x shape:        (window_size, n_features)
+        theta_true:     (n_health_params,)  — last timestep of window
+        ops shape:      (window_size, 4)    — full ops time-series for window
         """
         uid, w_start = self._index_list[idx]
         g_start = self._unit_ranges[uid][0] + w_start
@@ -186,11 +216,18 @@ class NCMAPSSDataset(Dataset):
         x   = torch.from_numpy(self._sensors[g_start:g_end].copy())
         rul = torch.tensor(float(self._rul[g_end - 1]), dtype=self.dtype)
 
+        if self.return_ops:
+            ops_t = torch.from_numpy(self._ops[g_start:g_end].copy())  # (T, 4)
+            if self.return_theta_true:
+                theta_t = torch.from_numpy(self._theta[g_end - 1].copy())
+                return x, rul, theta_t, ops_t          # 4-tuple
+            return x, rul, ops_t                        # 3-tuple (ops)
+
         if self.return_theta_true:
             theta_t = torch.from_numpy(self._theta[g_end - 1].copy())
-            return x, rul, theta_t
+            return x, rul, theta_t                      # 3-tuple (theta_true)
 
-        return x, rul
+        return x, rul                                   # 2-tuple
 
     # ------------------------------------------------------------------
     # Unit-trajectory helpers
@@ -223,11 +260,33 @@ class NCMAPSSDataset(Dataset):
     def n_health_params(self) -> int:
         return int(self._theta.shape[1]) if self._theta is not None else 0
 
-    @staticmethod
-    def feature_names(use_virtual_sensors: bool = False) -> list[str]:
-        names = OPERATING_CONDITION_NAMES + SENSOR_NAMES_XS
-        if use_virtual_sensors:
-            names = names + SENSOR_NAMES_XV
+    @property
+    def ops_dim(self) -> int:
+        """Number of operating-condition channels in _ops (4 for N-CMAPSS W).
+
+        Non-zero only when the dataset was created with return_ops=True;
+        used by models to detect whether an ops path should be active.
+        """
+        if self.return_ops and self._ops.ndim == 2 and self._ops.shape[0] > 0:
+            return int(self._ops.shape[1])
+        return 0
+
+    def feature_names(self, use_virtual_sensors: bool | None = None) -> list[str]:
+        """Ordered list of sensor feature names for the main ``x`` tensor.
+
+        When return_ops=True, W columns are excluded from ``x``; only X_s names
+        (and optionally X_v) are returned.  When return_ops=False (default),
+        OPERATING_CONDITION_NAMES are prepended as before.
+        """
+        uv = use_virtual_sensors if use_virtual_sensors is not None else self.use_virtual_sensors
+        if self.return_ops:
+            names = list(SENSOR_NAMES_XS)
+            if uv:
+                names = names + list(SENSOR_NAMES_XV)
+        else:
+            names = OPERATING_CONDITION_NAMES + list(SENSOR_NAMES_XS)
+            if uv:
+                names = names + list(SENSOR_NAMES_XV)
         return names
 
 
@@ -276,3 +335,11 @@ class SubsetByUnit(Dataset):
     @property
     def n_health_params(self) -> int:
         return self._base.n_health_params
+
+    @property
+    def ops_dim(self) -> int:
+        return self._base.ops_dim
+
+    @property
+    def return_ops(self) -> bool:
+        return self._base.return_ops

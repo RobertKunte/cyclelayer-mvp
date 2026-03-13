@@ -152,6 +152,42 @@ def _plot_scatter(df: pd.DataFrame, out_dir: Path) -> None:
     plt.close(fig)
 
 
+def _plot_within_cycle_scatter(df: pd.DataFrame, out_dir: Path) -> None:
+    """Boxplot of within-cycle prediction std per unit.
+
+    Each box shows how much the model's RUL estimate varies across timesteps
+    within a single flight cycle.  Lower std = model tracks degradation, not
+    operating-point oscillations.  Requires ``cycle_id`` column.
+    """
+    wc = (
+        df.groupby(["unit_id", "cycle_id"])["y_pred_rul"]
+        .std()
+        .fillna(0.0)
+        .reset_index()
+    )
+    wc.columns = ["unit_id", "cycle_id", "pred_std"]
+
+    units = sorted(df["unit_id"].unique())
+    data  = [wc[wc["unit_id"] == uid]["pred_std"].values for uid in units]
+    labels = [f"u{uid}" for uid in units]
+
+    fig, ax = plt.subplots(figsize=(max(6, len(units) * 1.8), 4))
+    bp = ax.boxplot(data, labels=labels, patch_artist=True, showfliers=False)
+    for patch in bp["boxes"]:
+        patch.set_facecolor("steelblue")
+        patch.set_alpha(0.6)
+    ax.set_ylabel("std(y_pred_rul) within cycle")
+    ax.set_title(
+        "Within-cycle prediction scatter per unit\n"
+        "(lower = model responds to degradation, not operating-point oscillations)"
+    )
+    ax.grid(True, alpha=0.3, axis="y")
+    plt.tight_layout()
+    path = out_dir / "within_cycle_scatter.png"
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _spike_locator(df: pd.DataFrame, n: int, out_dir: Path) -> pd.DataFrame:
     """Find top-N windows by abs_error per unit, save as CSV.
 
@@ -417,6 +453,22 @@ def main() -> None:
     print(f"Building spike locator (top-{args.n_spikes} per unit) ...")
     spike_df = _spike_locator(df_hist, args.n_spikes, out_dir)
     print(f"  Saved to {out_dir}/spike_locator.csv  ({len(spike_df)} rows)")
+
+    # --- Within-cycle scatter (requires cycle_id column from evaluate.py) ---
+    if "cycle_id" in df_hist.columns:
+        print("Plotting within-cycle scatter ...")
+        _plot_within_cycle_scatter(df_hist, out_dir)
+        print(f"  Saved to {out_dir}/within_cycle_scatter.png")
+        # Also save per-cycle std CSV for further analysis
+        wc = (
+            df_hist.groupby(["unit_id", "cycle_id"])["y_pred_rul"]
+            .agg(n_windows="count", pred_std="std", pred_range=lambda x: x.max() - x.min())
+            .reset_index()
+        )
+        wc["pred_std"]   = wc["pred_std"].fillna(0.0)
+        wc["pred_range"] = wc["pred_range"].fillna(0.0)
+        wc.to_csv(out_dir / "within_cycle_scatter.csv", index=False)
+        print(f"  Saved to {out_dir}/within_cycle_scatter.csv  ({len(wc)} cycles)")
 
     # --- Per-unit stats ---
     stats = _unit_stats(df_hist, alpha=args.alpha)

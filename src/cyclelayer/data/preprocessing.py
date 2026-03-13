@@ -141,6 +141,34 @@ def fit_sensor_scaler(
     return StandardScaler().fit(dataset._sensors[mask])
 
 
+def fit_ops_scaler(
+    dataset: "NCMAPSSDataset | Any",
+    train_units: list[int],
+) -> StandardScaler:
+    """Fit a StandardScaler on operating conditions (W) using only train-split rows.
+
+    Prevents data leakage: val and test rows are never seen during fit.
+    Should only be called when the dataset was created with ``return_ops=True``,
+    so that ``_ops`` and ``_sensors`` are separate arrays.
+
+    Args:
+        dataset: NCMAPSSDataset with _ops (N, 4) and _unit_id_arr (N,) populated.
+        train_units: Unit IDs whose rows are used for fitting.
+
+    Returns:
+        Fitted StandardScaler (not yet applied to the dataset).
+
+    Example::
+
+        scaler = fit_ops_scaler(base_ds, unit_splits["train"])
+        base_ds._ops = scaler.transform(base_ds._ops).astype(np.float32)
+    """
+    mask = np.isin(dataset._unit_id_arr, train_units)
+    if mask.sum() == 0:
+        raise ValueError(f"No rows found for train_units={train_units}.")
+    return StandardScaler().fit(dataset._ops[mask])
+
+
 def fit_theta_scaler(
     dataset: "NCMAPSSDataset | Any",
     train_units: list[int],

@@ -130,23 +130,29 @@ class CycleLayerV1Config:
     prog_dropout: float = 0.1
     max_rul: float | None = 125.0
     lambda_theta: float = 0.1             # weight for theta supervision loss
+    ops_dim: int = 0                      # 4 for N-CMAPSS W; 0 = no ops path
+    ops_hidden: int = 16                  # output channels of the ops encoder
 
 
 class CycleLayerNetV1(nn.Module):
     """Phase 2 CycleLayer: supervised health-parameter multi-task network.
 
-    Data flow:
+    Data flow (without ops):
         x (B, T, F)
-        -> SensorEncoder  (constrain_output=False, sigmoid -> [0,1])
+        -> SensorEncoder
         -> theta_hat (B, n_health_params)
         -> PrognosticsHead
         -> rul (B,)
 
-    forward() returns (rul, theta_hat) to enable CompositeLoss.
+    Data flow (with ops, ops_dim > 0):
+        x (B, T, F)  +  ops (B, T, ops_dim)
+        -> SensorEncoder(x)        -> theta_hat (B, n_health_params)
+        -> OpsEncoder(ops)         -> ops_emb   (B, ops_hidden)
+        -> cat([theta_hat, ops_emb])            (B, n_health_params + ops_hidden)
+        -> PrognosticsHead
+        -> rul (B,)
 
-    The BraytonCycleLayer is intentionally omitted in V1 to keep the
-    multi-task loss independent of the physics layer.  A subsequent phase
-    will insert a physics mapping between theta_hat and cycle features.
+    forward() returns (rul, theta_hat) to enable CompositeLoss.
 
     Args:
         config: CycleLayerV1Config with all hyper-parameters.
@@ -156,6 +162,7 @@ class CycleLayerNetV1(nn.Module):
         super().__init__()
         cfg = config or CycleLayerV1Config()
         self.config = cfg
+        self.ops_dim = cfg.ops_dim
 
         self.encoder = SensorEncoder(
             n_features=cfg.n_features,
@@ -167,24 +174,40 @@ class CycleLayerNetV1(nn.Module):
             dropout=cfg.encoder_dropout,
             constrain_output=False,       # health params, not Brayton
         )
+
+        if cfg.ops_dim > 0:
+            self.ops_enc = nn.Sequential(
+                nn.Conv1d(cfg.ops_dim, cfg.ops_hidden, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.AdaptiveAvgPool1d(1),
+            )
+            prog_in = cfg.n_health_params + cfg.ops_hidden
+        else:
+            prog_in = cfg.n_health_params
+
         self.prognostics = PrognosticsHead(
-            in_features=cfg.n_health_params,
+            in_features=prog_in,
             hidden_sizes=cfg.prog_hidden_sizes,
             dropout=cfg.prog_dropout,
             max_rul=cfg.max_rul,
         )
 
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(self, x: Tensor, ops: Tensor | None = None) -> tuple[Tensor, Tensor]:
         """Return (rul, theta_hat).
 
         Args:
-            x: (B, window_size, n_features)
+            x:   (B, window_size, n_features)
+            ops: (B, window_size, ops_dim) or None
         Returns:
             rul:       (B,)
             theta_hat: (B, n_health_params)
         """
         theta_hat = self.encoder(x)
-        rul       = self.prognostics(theta_hat)
+        h = theta_hat
+        if self.ops_dim > 0 and ops is not None:
+            ops_h = self.ops_enc(ops.permute(0, 2, 1)).squeeze(-1)  # (B, ops_hidden)
+            h = torch.cat([theta_hat, ops_h], dim=-1)
+        rul = self.prognostics(h)
         return rul, theta_hat
 
     @classmethod

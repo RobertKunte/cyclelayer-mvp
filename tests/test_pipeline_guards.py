@@ -6,6 +6,7 @@ Covers:
     3. Theta scaler determinism: same train units → same mean/std across calls.
     4. Theta scaler raises on empty train mask.
     5. predictions.csv structure: verify expected columns are present.
+    6. Ops: return_ops separates sensors from W; shapes and scaler correct.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import pytest
 
 # Re-use the synthetic dataset factory from test_dataset.py
 from tests.test_dataset import _make_synthetic_dataset
-from cyclelayer.data.preprocessing import StandardScaler, fit_sensor_scaler, fit_theta_scaler
+from cyclelayer.data.preprocessing import StandardScaler, fit_ops_scaler, fit_sensor_scaler, fit_theta_scaler
 
 
 # ---------------------------------------------------------------------------
@@ -201,3 +202,84 @@ def test_predictions_csv_columns():
         assert grp["time_index"].iloc[0] == 0, (
             f"unit {uid}: time_index should start at 0"
         )
+
+
+# ---------------------------------------------------------------------------
+# 6. Operating conditions (ops) — return_ops, _ops field, ops scaler
+# ---------------------------------------------------------------------------
+
+def test_return_ops_false_sensor_shape_unchanged():
+    """With return_ops=False (default), _sensors keeps all n_features columns."""
+    n_features = 8
+    ds = _make_synthetic_dataset({1: 30, 2: 20}, window_size=5, n_features=n_features)
+    assert ds.n_features == n_features, (
+        f"return_ops=False: expected n_features={n_features}, got {ds.n_features}"
+    )
+    assert ds.ops_dim == 0, "ops_dim must be 0 when return_ops=False"
+
+
+def test_return_ops_true_sensor_shape_reduced():
+    """With return_ops=True, _sensors = X_s only (n_features cols, not n_features+4).
+
+    The synthetic helper stores n_features sensor cols; _ops is always n_ops cols.
+    With return_ops=True, ops_dim > 0.
+    """
+    n_features = 6
+    ds = _make_synthetic_dataset(
+        {1: 30, 2: 20}, window_size=5, n_features=n_features, return_ops=True
+    )
+    assert ds.n_features == n_features, (
+        f"return_ops=True: expected n_features={n_features}, got {ds.n_features}"
+    )
+    assert ds.ops_dim == 4, f"ops_dim must be 4 when return_ops=True, got {ds.ops_dim}"
+
+
+def test_return_ops_getitem_returns_3tuple():
+    """__getitem__ returns (x, rul, ops) 3-tuple when return_ops=True."""
+    import torch
+    ds = _make_synthetic_dataset(
+        {1: 20}, window_size=5, n_features=6, return_ops=True
+    )
+    sample = ds[0]
+    assert len(sample) == 3, f"Expected 3-tuple, got {len(sample)}-tuple"
+    x, rul, ops = sample
+    assert x.shape == (5, 6),  f"x shape: expected (5,6), got {x.shape}"
+    assert ops.shape == (5, 4), f"ops shape: expected (5,4), got {ops.shape}"
+    assert rul.ndim == 0, "rul must be scalar tensor"
+
+
+def test_ops_stored_separately_from_sensors():
+    """_ops and _sensors are distinct arrays; no column overlap."""
+    n_features, n_ops = 6, 4
+    ds = _make_synthetic_dataset(
+        {1: 30}, window_size=5, n_features=n_features, n_ops=n_ops
+    )
+    assert ds._sensors.shape[1] == n_features, (
+        f"_sensors cols: expected {n_features}, got {ds._sensors.shape[1]}"
+    )
+    assert ds._ops.shape[1] == n_ops, (
+        f"_ops cols: expected {n_ops}, got {ds._ops.shape[1]}"
+    )
+
+
+def test_ops_scaler_no_leakage():
+    """Ops scaler fitted on train units must NOT include val/test stats."""
+    # Unit u has ops = [u*1000, u*0.1, u*10, u*100]
+    unit_counts = {1: 30, 2: 30, 3: 30}
+    ds = _make_synthetic_dataset(unit_counts, window_size=5)
+
+    scaler = fit_ops_scaler(ds, train_units=[1])
+    # Unit-1 ops: col 0 = 1000.0 for all rows → mean col0 should be ≈ 1000
+    np.testing.assert_allclose(scaler.mean_[0], 1000.0, atol=1e-3,
+                                err_msg="ops scaler mean[0] should reflect only unit-1 rows")
+    # If val units leaked, col0 mean would be (1000+2000+3000)/3 = 2000
+    assert not np.isclose(scaler.mean_[0], 2000.0, atol=100.0), (
+        "Ops scaler mean matches global mean — val/test rows may have leaked"
+    )
+
+
+def test_ops_scaler_raises_on_empty():
+    """fit_ops_scaler must raise ValueError when no rows match train_units."""
+    ds = _make_synthetic_dataset({1: 20, 2: 20}, window_size=5)
+    with pytest.raises(ValueError, match="No rows found"):
+        fit_ops_scaler(ds, train_units=[99])

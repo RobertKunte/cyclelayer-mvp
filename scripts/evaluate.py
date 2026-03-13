@@ -66,13 +66,22 @@ def run_inference(
     loader: DataLoader,
     device: torch.device,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return (preds, targets) preserving sample order (shuffle=False required)."""
+    """Return (preds, targets) preserving sample order (shuffle=False required).
+
+    Automatically detects whether the model uses a separate ops path
+    (getattr(model, 'ops_dim', 0) > 0) and passes ops from 3-tuple batches.
+    """
     model.eval()
+    has_ops_model = getattr(model, "ops_dim", 0) > 0
     preds, targets = [], []
     for batch in loader:
         x   = batch[0].to(device)
         rul = batch[1]
-        out = model(x)
+        if has_ops_model and len(batch) >= 3:
+            ops = batch[2].to(device)   # 3-tuple (x, rul, ops) when use_ops=True
+            out = model(x, ops=ops)
+        else:
+            out = model(x)
         if isinstance(out, tuple):   # CycleLayerNetV1 returns (rul, theta_hat)
             out = out[0]
         preds.append(out.cpu().numpy())
@@ -121,6 +130,7 @@ def main() -> None:
 
     # Dataset — use stride_eval (default 1) for full per-unit trajectories
     stride_eval = d.get("stride_eval", 1)
+    use_ops = d.get("use_ops", False)
     dataset = NCMAPSSDataset(
         hdf5_path=hdf5_path,
         split=args.split,
@@ -128,6 +138,7 @@ def main() -> None:
         stride=stride_eval,
         use_virtual_sensors=d.get("use_virtual_sensors", False),
         return_theta_true=False,
+        return_ops=use_ops,
         units=eval_units,
     )
     loader = DataLoader(
@@ -140,7 +151,7 @@ def main() -> None:
     # Model
     ckpt_path = args.checkpoint or cfg["evaluation"]["checkpoint"]
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model = build_model(cfg, dataset.n_features, dataset.n_health_params).to(device)
+    model = build_model(cfg, dataset.n_features, dataset.n_health_params, dataset.ops_dim).to(device)
     model.load_state_dict(ckpt["model"])
     logger.info(f"Loaded checkpoint: {ckpt_path}  (epoch {ckpt.get('epoch', '?')})")
 
@@ -158,6 +169,20 @@ def main() -> None:
             f"No sensor_scaler.npz found at {sensor_scaler_path} — using raw sensors. "
             "Predictions may be poor if the model was trained with normalization."
         )
+
+    # Apply ops scaler when use_ops=True (saved during training)
+    if use_ops:
+        ops_scaler_path = ckpt_dir / "ops_scaler.npz"
+        if ops_scaler_path.exists():
+            sc = np.load(ops_scaler_path)
+            sc_std_safe = np.where(sc["std"] == 0, 1.0, sc["std"])
+            dataset._ops = ((dataset._ops - sc["mean"]) / sc_std_safe).astype(np.float32)
+            logger.info(f"Ops scaler applied from {ops_scaler_path}")
+        else:
+            logger.warning(
+                f"No ops_scaler.npz found at {ops_scaler_path} — using raw ops. "
+                "Predictions may be poor if the model was trained with normalized ops."
+            )
 
     # Inference
     preds, targets = run_inference(model, loader, device)
@@ -359,10 +384,37 @@ def main() -> None:
         f"({n_cycles:,} cycles)  -> {cycle_pred_path}"
     )
 
-    # Add cycle-avg metrics to the dict before writing metrics.json
+    # Add cycle-avg metrics to the dict
     metrics["rmse_cycle"]         = rmse_cycle
     metrics["s_score_cycle_mean"] = s_score_cycle
     metrics["n_cycles"]           = n_cycles
+
+    # ── Within-cycle scatter metrics ──────────────────────────────────────────
+    # std(y_pred) within each (unit, cycle) group measures how much the model's
+    # RUL estimate varies across timesteps within a single flight cycle.
+    # Low values indicate the model is insensitive to within-cycle ops changes
+    # (desirable: degradation, not operating point, should drive RUL).
+    wc = (
+        pred_df.groupby(["unit_id", "cycle_id"])["y_pred_rul"]
+        .agg(n_windows="count", pred_std="std", pred_range=lambda x: x.max() - x.min())
+        .reset_index()
+    )
+    wc["pred_std"]   = wc["pred_std"].fillna(0.0)    # cycles with 1 window → NaN std
+    wc["pred_range"] = wc["pred_range"].fillna(0.0)
+
+    wc_std_median   = float(wc["pred_std"].median())
+    wc_range_median = float(wc["pred_range"].median())
+
+    within_cycle_path = out_path.parent / "within_cycle_scatter.csv"
+    wc.to_csv(within_cycle_path, index=False)
+    logger.info(
+        f"Within-cycle scatter: std_median={wc_std_median:.3f}  "
+        f"range_median={wc_range_median:.3f}  -> {within_cycle_path}"
+    )
+
+    metrics["within_cycle_pred_std_median"]   = wc_std_median
+    metrics["within_cycle_pred_range_median"] = wc_range_median
+
     out_path.write_text(json.dumps(metrics, indent=2))
     logger.info(f"Metrics saved -> {out_path}")
 

@@ -27,7 +27,7 @@ class CNNBaseline(nn.Module):
     """1-D convolutional baseline for RUL regression.
 
     Args:
-        n_features: Input feature channels.
+        n_features: Input feature channels (X_s only when ops_dim > 0).
         channels: Channel sizes for each conv block.
         kernel_size: Kernel size for all conv layers.
         mlp_hidden: Hidden size of the MLP head.
@@ -35,7 +35,14 @@ class CNNBaseline(nn.Module):
         max_rul: Soft output clamp (None to disable).
         theta_true_dim: If > 0, concatenate a ground-truth health-parameter
             vector of this size to the CNN embedding before the MLP head.
+        ops_dim: If > 0, add a separate small Conv1d encoder for operating
+            conditions (W).  ops_dim is typically 4 (alt, Mach, TRA, T2).
+            The ops embedding (16 channels) is concatenated to the main CNN
+            embedding before the MLP head.
     """
+
+    # Hidden size of the ops encoder (fixed; small to keep the ops path lightweight)
+    _OPS_HIDDEN: int = 16
 
     def __init__(
         self,
@@ -46,10 +53,12 @@ class CNNBaseline(nn.Module):
         dropout: float = 0.2,
         max_rul: float | None = 125.0,
         theta_true_dim: int = 0,
+        ops_dim: int = 0,
     ) -> None:
         super().__init__()
         self.max_rul = max_rul
         self.theta_true_dim = theta_true_dim
+        self.ops_dim = ops_dim
 
         cnn_layers: list[nn.Module] = []
         in_ch = n_features
@@ -64,7 +73,16 @@ class CNNBaseline(nn.Module):
         self.cnn = nn.Sequential(*cnn_layers)
         self._cnn_out_ch = in_ch
 
-        head_in = in_ch + theta_true_dim
+        # Separate ops encoder: Conv1d(ops_dim → _OPS_HIDDEN) + pool
+        # Takes (B, T, ops_dim) → (B, _OPS_HIDDEN)
+        if ops_dim > 0:
+            self.ops_enc = nn.Sequential(
+                nn.Conv1d(ops_dim, self._OPS_HIDDEN, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.AdaptiveAvgPool1d(1),
+            )
+
+        head_in = in_ch + theta_true_dim + (self._OPS_HIDDEN if ops_dim > 0 else 0)
         self.head = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(head_in, mlp_hidden),
@@ -76,16 +94,25 @@ class CNNBaseline(nn.Module):
             init.xavier_uniform_(self.head[-2].weight)
             init.constant_(self.head[-2].bias, max_rul / 2.0)
 
-    def forward(self, x: Tensor, theta_true: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        theta_true: Tensor | None = None,
+        ops: Tensor | None = None,
+    ) -> Tensor:
         """Args:
             x:          (B, window_size, n_features)
             theta_true: (B, theta_true_dim) or None
+            ops:        (B, window_size, ops_dim) or None
         Returns:
             rul: (B,)
         """
         h = self.cnn(x.permute(0, 2, 1)).squeeze(-1)  # (B, C)
         if self.theta_true_dim > 0 and theta_true is not None:
             h = torch.cat([h, theta_true], dim=-1)     # (B, C + D)
+        if self.ops_dim > 0 and ops is not None:
+            ops_h = self.ops_enc(ops.permute(0, 2, 1)).squeeze(-1)  # (B, _OPS_HIDDEN)
+            h = torch.cat([h, ops_h], dim=-1)
         out = self.head(h).squeeze(-1)
         if self.max_rul is not None:
             out = out.clamp(max=self.max_rul)
@@ -100,7 +127,7 @@ class LSTMBaseline(nn.Module):
     """Bidirectional LSTM baseline for RUL regression.
 
     Args:
-        n_features: Input feature channels.
+        n_features: Input feature channels (X_s only when ops_dim > 0).
         hidden_size: LSTM hidden state size (per direction).
         n_layers: Number of LSTM layers.
         bidirectional: If True, use a bidirectional LSTM.
@@ -109,7 +136,11 @@ class LSTMBaseline(nn.Module):
         max_rul: Soft output clamp (None to disable).
         theta_true_dim: If > 0, concatenate ground-truth health parameters
             to the LSTM embedding before the MLP head.
+        ops_dim: If > 0, add a separate small Conv1d encoder for operating
+            conditions (W).  Embedding (16 channels) is fused before MLP head.
     """
+
+    _OPS_HIDDEN: int = 16
 
     def __init__(
         self,
@@ -121,11 +152,13 @@ class LSTMBaseline(nn.Module):
         dropout: float = 0.2,
         max_rul: float | None = 125.0,
         theta_true_dim: int = 0,
+        ops_dim: int = 0,
     ) -> None:
         super().__init__()
         self.max_rul = max_rul
         self.bidirectional = bidirectional
         self.theta_true_dim = theta_true_dim
+        self.ops_dim = ops_dim
 
         self.lstm = nn.LSTM(
             input_size=n_features,
@@ -136,8 +169,15 @@ class LSTMBaseline(nn.Module):
             dropout=dropout if n_layers > 1 else 0.0,
         )
 
+        if ops_dim > 0:
+            self.ops_enc = nn.Sequential(
+                nn.Conv1d(ops_dim, self._OPS_HIDDEN, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.AdaptiveAvgPool1d(1),
+            )
+
         lstm_out_size = hidden_size * (2 if bidirectional else 1)
-        head_in = lstm_out_size + theta_true_dim
+        head_in = lstm_out_size + theta_true_dim + (self._OPS_HIDDEN if ops_dim > 0 else 0)
         self.head = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(head_in, mlp_hidden),
@@ -149,10 +189,16 @@ class LSTMBaseline(nn.Module):
             init.xavier_uniform_(self.head[-2].weight)
             init.constant_(self.head[-2].bias, max_rul / 2.0)
 
-    def forward(self, x: Tensor, theta_true: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        theta_true: Tensor | None = None,
+        ops: Tensor | None = None,
+    ) -> Tensor:
         """Args:
             x:          (B, window_size, n_features)
             theta_true: (B, theta_true_dim) or None
+            ops:        (B, window_size, ops_dim) or None
         Returns:
             rul: (B,)
         """
@@ -164,6 +210,10 @@ class LSTMBaseline(nn.Module):
 
         if self.theta_true_dim > 0 and theta_true is not None:
             h = torch.cat([h, theta_true], dim=-1)
+
+        if self.ops_dim > 0 and ops is not None:
+            ops_h = self.ops_enc(ops.permute(0, 2, 1)).squeeze(-1)  # (B, _OPS_HIDDEN)
+            h = torch.cat([h, ops_h], dim=-1)
 
         out = self.head(h).squeeze(-1)
         if self.max_rul is not None:

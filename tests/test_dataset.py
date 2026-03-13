@@ -35,14 +35,18 @@ def _make_synthetic_dataset(
     n_features: int = 4,
     n_health: int = 3,
     return_theta_true: bool = False,
+    return_ops: bool = False,
+    n_ops: int = 4,
 ) -> NCMAPSSDataset:
     """Build a synthetic dataset with controlled unit time-series lengths.
 
     unit_counts: {uid: n_timesteps} for each unit.
+    n_ops: number of operating condition channels in _ops (matches real W=4).
     """
     rows: list[np.ndarray] = []
     rul_rows: list[float] = []
     theta_rows: list[np.ndarray] = []
+    ops_rows: list[np.ndarray] = []
     A_rows: list[np.ndarray] = []
 
     for uid, n_steps in unit_counts.items():
@@ -50,20 +54,29 @@ def _make_synthetic_dataset(
             rows.append(np.full(n_features, float(uid) + t * 0.01, dtype=np.float32))
             rul_rows.append(float(n_steps - 1 - t))
             theta_rows.append(np.ones(n_health, dtype=np.float32) * uid * 0.1)
+            # Synthetic ops: different scale per channel, distinct per unit
+            ops_rows.append(np.array(
+                [uid * 1000.0, uid * 0.1, uid * 10.0, uid * 100.0],
+                dtype=np.float32
+            )[:n_ops])
             A_rows.append(np.array([uid, t, 1, 1], dtype=np.float32))
 
     sensors_all = np.stack(rows)
     rul_all     = np.array(rul_rows, dtype=np.float32)
     theta_all   = np.stack(theta_rows)
+    ops_all     = np.stack(ops_rows)
     A_all       = np.stack(A_rows)
     unit_ids    = A_all[:, 0].astype(np.int32)
+    cycle_ids   = A_all[:, 1].astype(np.int32)
 
     # Sort by (unit, cycle) — already sorted but let's be explicit
     order = np.lexsort((A_all[:, 1], unit_ids))
     sensors_all = sensors_all[order]
     rul_all     = rul_all[order]
     theta_all   = theta_all[order]
+    ops_all     = ops_all[order]
     unit_ids    = unit_ids[order]
+    cycle_ids   = cycle_ids[order]
 
     ds = NCMAPSSDataset.__new__(NCMAPSSDataset)
     ds.hdf5_path = Path("synthetic")
@@ -72,12 +85,15 @@ def _make_synthetic_dataset(
     ds.stride = stride
     ds.use_virtual_sensors = False
     ds.return_theta_true = return_theta_true
+    ds.return_ops = return_ops
     ds.dtype = torch.float32
 
     ds._sensors     = sensors_all
+    ds._ops         = ops_all
     ds._rul         = rul_all
     ds._theta       = theta_all
     ds._unit_id_arr = unit_ids
+    ds._cycle_arr   = cycle_ids
 
     cumsum = 0
     ds._unit_ranges = {}

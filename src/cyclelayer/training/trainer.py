@@ -454,7 +454,14 @@ class Trainer:
             targets_list.append(batch[1].cpu().float())
             if theta_hat is not None:
                 theta_hat_list.append(theta_hat.cpu().float())
-            if len(batch) >= 3 and isinstance(batch[2], torch.Tensor):
+            # Only collect batch[2] as theta_true when the model actually uses it;
+            # avoids mixing up the (x, rul, ops) 3-tuple with (x, rul, theta_true).
+            has_theta_model = getattr(self.model, "theta_true_dim", 0) > 0
+            has_ops_model   = getattr(self.model, "ops_dim", 0) > 0
+            if has_theta_model and len(batch) >= 3 and isinstance(batch[2], torch.Tensor):
+                theta_true_list.append(batch[2].cpu().float())
+            elif not has_theta_model and len(batch) >= 4 and isinstance(batch[2], torch.Tensor):
+                # 4-tuple: batch[2] = theta_true, batch[3] = ops
                 theta_true_list.append(batch[2].cpu().float())
 
         n = len(self.val_loader)
@@ -542,19 +549,49 @@ class Trainer:
                 If False (default), return (loss, components).
 
         Handles:
-          - (x, rul)             + scalar-output model  -> RULLoss
-          - (x, rul)             + tuple-output model   -> RULLoss on rul
-          - (x, rul, theta_true) + scalar-output model  -> RULLoss
-          - (x, rul, theta_true) + tuple-output model   -> CompositeLoss
-        """
-        x          = batch[0]
-        rul_true   = batch[1]
-        theta_true = batch[2] if len(batch) >= 3 else None
-        theta_hat  = None
+          - (x, rul)                  + any model          -> RULLoss
+          - (x, rul, theta_true)      + theta-input model  -> CompositeLoss
+          - (x, rul, ops)             + ops model          -> RULLoss / CompositeLoss
+          - (x, rul, theta_true, ops) + theta+ops model    -> CompositeLoss
 
-        # Forward pass (single pass; result used for both loss and stats)
-        if theta_true is not None and getattr(self.model, "theta_true_dim", 0) > 0:
-            model_out = self.model(x, theta_true)
+        Disambiguation of 3-tuple batch[2]:
+          = ops        when model.ops_dim > 0 AND model.theta_true_dim == 0
+          = theta_true otherwise (existing convention)
+        """
+        x        = batch[0]
+        rul_true = batch[1]
+        theta_hat = None
+
+        has_ops_model   = getattr(self.model, "ops_dim", 0) > 0
+        has_theta_model = getattr(self.model, "theta_true_dim", 0) > 0
+
+        # Unpack optional extras based on batch length and model type
+        if len(batch) >= 4:
+            # 4-tuple: (x, rul, theta_true, ops)
+            theta_true = batch[2]
+            ops        = batch[3]
+        elif len(batch) >= 3:
+            if has_ops_model and not has_theta_model:
+                # 3-tuple (x, rul, ops) — ops-only baseline
+                theta_true = None
+                ops        = batch[2]
+            else:
+                # 3-tuple (x, rul, theta_true) — existing convention
+                theta_true = batch[2]
+                ops        = None
+        else:
+            theta_true = None
+            ops        = None
+
+        # Forward pass — all extra inputs as keyword arguments (backward compatible)
+        fwd_kwargs: dict = {}
+        if has_theta_model and theta_true is not None:
+            fwd_kwargs["theta_true"] = theta_true
+        if has_ops_model and ops is not None:
+            fwd_kwargs["ops"] = ops
+
+        if fwd_kwargs:
+            model_out = self.model(x, **fwd_kwargs)
         else:
             model_out = self.model(x)
 

@@ -38,7 +38,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from cyclelayer.data.ncmapss import NCMAPSSDataset, SubsetByUnit
-from cyclelayer.data.preprocessing import StandardScaler, fit_sensor_scaler, fit_theta_scaler
+from cyclelayer.data.preprocessing import StandardScaler, fit_ops_scaler, fit_sensor_scaler, fit_theta_scaler
 from cyclelayer.data.splits import extract_unit_ids, load_splits, make_unit_splits, save_splits, splits_exist
 from cyclelayer.models.baselines import CNNBaseline, LSTMBaseline
 from cyclelayer.models.cycle_layer import CycleLayerNet, CycleLayerNetV1
@@ -56,7 +56,12 @@ logger = logging.getLogger(__name__)
 # Model factory
 # ---------------------------------------------------------------------------
 
-def build_model(cfg: dict, n_features: int, n_health_params: int) -> torch.nn.Module:
+def build_model(
+    cfg: dict,
+    n_features: int,
+    n_health_params: int,
+    ops_dim: int = 0,
+) -> torch.nn.Module:
     """Construct a model from config dict.
 
     Supported types:
@@ -66,6 +71,12 @@ def build_model(cfg: dict, n_features: int, n_health_params: int) -> torch.nn.Mo
         cnn_theta         – CNNBaseline with theta_true concat (upper bound)
         lstm              – LSTMBaseline
         lstm_theta        – LSTMBaseline with theta_true concat (upper bound)
+
+    Args:
+        cfg: Full config dict (data + model + training sections).
+        n_features: Sensor feature count (14 when use_ops=True, else 18).
+        n_health_params: Number of health parameters (10 for N-CMAPSS).
+        ops_dim: Operating condition channels (4 when use_ops=True, else 0).
     """
     mc = cfg["model"]
     model_type = mc["type"]
@@ -86,6 +97,7 @@ def build_model(cfg: dict, n_features: int, n_health_params: int) -> torch.nn.Mo
         mc_full["n_features"] = n_features
         mc_full.setdefault("n_health_params", n_health_params)
         mc_full.setdefault("max_rul", max_rul)  # same fix as above
+        mc_full.setdefault("ops_dim", ops_dim)
         return CycleLayerNetV1.from_config_dict(mc_full)
 
     use_theta = model_type.endswith("_theta")
@@ -102,6 +114,7 @@ def build_model(cfg: dict, n_features: int, n_health_params: int) -> torch.nn.Mo
             dropout=c.get("dropout", 0.2),
             max_rul=max_rul,
             theta_true_dim=theta_dim,
+            ops_dim=ops_dim,
         )
     if base_type == "lstm":
         c = mc.get("lstm", {})
@@ -114,6 +127,7 @@ def build_model(cfg: dict, n_features: int, n_health_params: int) -> torch.nn.Mo
             dropout=c.get("dropout", 0.2),
             max_rul=max_rul,
             theta_true_dim=theta_dim,
+            ops_dim=ops_dim,
         )
     raise ValueError(f"Unknown model type: {model_type!r}")
 
@@ -188,6 +202,7 @@ def main() -> None:
     # ── Dataset ───────────────────────────────────────────────────────────────
     needs_theta = model_type in ("cyclelayer_v1", "cnn_theta", "lstm_theta")
     stride_train = d.get("stride_train", d.get("stride", 1))
+    use_ops = d.get("use_ops", False)
 
     base_ds = NCMAPSSDataset(
         hdf5_path=hdf5_path,
@@ -196,6 +211,7 @@ def main() -> None:
         stride=stride_train,
         use_virtual_sensors=d.get("use_virtual_sensors", False),
         return_theta_true=needs_theta,
+        return_ops=use_ops,
     )
 
     output_dir = Path(t.get("output_dir", "runs/experiment"))
@@ -217,6 +233,23 @@ def main() -> None:
         mean=sensor_scaler.mean_,
         std=sensor_scaler.std_,
     )
+
+    # ── Ops normalization (train-split fit, applied to all rows) ──────────────
+    # When use_ops=True, operating conditions (W: alt, Mach, TRA, T2) are in
+    # _ops and excluded from _sensors.  They need their own scaler because their
+    # scales differ greatly from each other (alt~35000 ft, Mach~0.8, etc.).
+    if use_ops:
+        ops_scaler = fit_ops_scaler(base_ds, unit_splits["train"])
+        base_ds._ops = ops_scaler.transform(base_ds._ops).astype(np.float32)
+        logger.info(
+            f"Ops StandardScaler fitted on {n_train_rows} train rows, "
+            f"applied to all {len(base_ds._ops)} rows."
+        )
+        np.savez(
+            output_dir / "ops_scaler.npz",
+            mean=ops_scaler.mean_,
+            std=ops_scaler.std_,
+        )
 
     # ── Theta normalization (train-split fit, applied to all rows) ─────────────
     if needs_theta and base_ds._theta is not None:
@@ -256,7 +289,7 @@ def main() -> None:
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = build_model(cfg, base_ds.n_features, base_ds.n_health_params)
+    model = build_model(cfg, base_ds.n_features, base_ds.n_health_params, base_ds.ops_dim)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model: {model_type}  |  trainable params: {n_params:,}")
 
