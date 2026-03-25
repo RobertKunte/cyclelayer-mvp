@@ -18,6 +18,8 @@ import torch.nn as nn
 import torch.nn.init as init
 from torch import Tensor
 
+from cyclelayer.models.encoder import OpsEncoder
+
 
 # ---------------------------------------------------------------------------
 # CNN Baseline
@@ -35,14 +37,16 @@ class CNNBaseline(nn.Module):
         max_rul: Soft output clamp (None to disable).
         theta_true_dim: If > 0, concatenate a ground-truth health-parameter
             vector of this size to the CNN embedding before the MLP head.
-        ops_dim: If > 0, add a separate small Conv1d encoder for operating
-            conditions (W).  ops_dim is typically 4 (alt, Mach, TRA, T2).
-            The ops embedding (16 channels) is concatenated to the main CNN
-            embedding before the MLP head.
+        ops_dim: If > 0, enable a separate OpsEncoder for operating conditions
+            (W: alt, Mach, TRA, T2).  ops_dim is typically 4.
+        ops_enc_channels: Conv channel depths for OpsEncoder.  Defaults to
+            [16, 32] (lighter than sensor path — regime signal, not degradation).
+        ops_enc_out_dim: Output embedding dimension of OpsEncoder.
+        fusion_hidden_dim: If > 0, apply a Linear+GELU+LayerNorm fusion projection
+            after concat([sensor_emb, ops_emb]) before the MLP head.  This lets the
+            model learn to interpret sensor signals under the given operating regime.
+            0 = skip fusion (concat fed directly to head).
     """
-
-    # Hidden size of the ops encoder (fixed; small to keep the ops path lightweight)
-    _OPS_HIDDEN: int = 16
 
     def __init__(
         self,
@@ -54,6 +58,9 @@ class CNNBaseline(nn.Module):
         max_rul: float | None = 125.0,
         theta_true_dim: int = 0,
         ops_dim: int = 0,
+        ops_enc_channels: list[int] | None = None,
+        ops_enc_out_dim: int = 32,
+        fusion_hidden_dim: int = 0,
     ) -> None:
         super().__init__()
         self.max_rul = max_rul
@@ -73,16 +80,33 @@ class CNNBaseline(nn.Module):
         self.cnn = nn.Sequential(*cnn_layers)
         self._cnn_out_ch = in_ch
 
-        # Separate ops encoder: Conv1d(ops_dim → _OPS_HIDDEN) + pool
-        # Takes (B, T, ops_dim) → (B, _OPS_HIDDEN)
+        # Operating-condition regime encoder (OpsEncoder)
+        # Processes ops as a temporal sequence — not just a summary statistic.
+        # NOTE: this is an intermediate step; ops may later feed into BraytonLayer.
         if ops_dim > 0:
-            self.ops_enc = nn.Sequential(
-                nn.Conv1d(ops_dim, self._OPS_HIDDEN, kernel_size=3, padding=1),
-                nn.GELU(),
-                nn.AdaptiveAvgPool1d(1),
+            self.ops_enc: OpsEncoder | None = OpsEncoder(
+                ops_dim=ops_dim,
+                channels=ops_enc_channels,
+                out_dim=ops_enc_out_dim,
             )
+            self._ops_out = ops_enc_out_dim
+        else:
+            self.ops_enc = None
+            self._ops_out = 0
 
-        head_in = in_ch + theta_true_dim + (self._OPS_HIDDEN if ops_dim > 0 else 0)
+        # Optional fusion projection: learns regime-conditioned feature interpretation
+        concat_dim = in_ch + theta_true_dim + self._ops_out
+        if fusion_hidden_dim > 0 and self._ops_out > 0:
+            self.fusion: nn.Sequential | None = nn.Sequential(
+                nn.Linear(concat_dim, fusion_hidden_dim),
+                nn.GELU(),
+                nn.LayerNorm(fusion_hidden_dim),
+            )
+            head_in = fusion_hidden_dim
+        else:
+            self.fusion = None
+            head_in = concat_dim
+
         self.head = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(head_in, mlp_hidden),
@@ -109,10 +133,11 @@ class CNNBaseline(nn.Module):
         """
         h = self.cnn(x.permute(0, 2, 1)).squeeze(-1)  # (B, C)
         if self.theta_true_dim > 0 and theta_true is not None:
-            h = torch.cat([h, theta_true], dim=-1)     # (B, C + D)
-        if self.ops_dim > 0 and ops is not None:
-            ops_h = self.ops_enc(ops.permute(0, 2, 1)).squeeze(-1)  # (B, _OPS_HIDDEN)
-            h = torch.cat([h, ops_h], dim=-1)
+            h = torch.cat([h, theta_true], dim=-1)
+        if self.ops_enc is not None and ops is not None:
+            h = torch.cat([h, self.ops_enc(ops)], dim=-1)
+        if self.fusion is not None:
+            h = self.fusion(h)
         out = self.head(h).squeeze(-1)
         if self.max_rul is not None:
             out = out.clamp(max=self.max_rul)
@@ -136,11 +161,11 @@ class LSTMBaseline(nn.Module):
         max_rul: Soft output clamp (None to disable).
         theta_true_dim: If > 0, concatenate ground-truth health parameters
             to the LSTM embedding before the MLP head.
-        ops_dim: If > 0, add a separate small Conv1d encoder for operating
-            conditions (W).  Embedding (16 channels) is fused before MLP head.
+        ops_dim: If > 0, enable a separate OpsEncoder for operating conditions.
+        ops_enc_channels: Conv channel depths for OpsEncoder (default [16, 32]).
+        ops_enc_out_dim: Output embedding dimension of OpsEncoder.
+        fusion_hidden_dim: If > 0, apply a fusion projection after concat before head.
     """
-
-    _OPS_HIDDEN: int = 16
 
     def __init__(
         self,
@@ -153,6 +178,9 @@ class LSTMBaseline(nn.Module):
         max_rul: float | None = 125.0,
         theta_true_dim: int = 0,
         ops_dim: int = 0,
+        ops_enc_channels: list[int] | None = None,
+        ops_enc_out_dim: int = 32,
+        fusion_hidden_dim: int = 0,
     ) -> None:
         super().__init__()
         self.max_rul = max_rul
@@ -170,14 +198,29 @@ class LSTMBaseline(nn.Module):
         )
 
         if ops_dim > 0:
-            self.ops_enc = nn.Sequential(
-                nn.Conv1d(ops_dim, self._OPS_HIDDEN, kernel_size=3, padding=1),
-                nn.GELU(),
-                nn.AdaptiveAvgPool1d(1),
+            self.ops_enc: OpsEncoder | None = OpsEncoder(
+                ops_dim=ops_dim,
+                channels=ops_enc_channels,
+                out_dim=ops_enc_out_dim,
             )
+            self._ops_out = ops_enc_out_dim
+        else:
+            self.ops_enc = None
+            self._ops_out = 0
 
         lstm_out_size = hidden_size * (2 if bidirectional else 1)
-        head_in = lstm_out_size + theta_true_dim + (self._OPS_HIDDEN if ops_dim > 0 else 0)
+        concat_dim = lstm_out_size + theta_true_dim + self._ops_out
+        if fusion_hidden_dim > 0 and self._ops_out > 0:
+            self.fusion: nn.Sequential | None = nn.Sequential(
+                nn.Linear(concat_dim, fusion_hidden_dim),
+                nn.GELU(),
+                nn.LayerNorm(fusion_hidden_dim),
+            )
+            head_in = fusion_hidden_dim
+        else:
+            self.fusion = None
+            head_in = concat_dim
+
         self.head = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(head_in, mlp_hidden),
@@ -211,9 +254,11 @@ class LSTMBaseline(nn.Module):
         if self.theta_true_dim > 0 and theta_true is not None:
             h = torch.cat([h, theta_true], dim=-1)
 
-        if self.ops_dim > 0 and ops is not None:
-            ops_h = self.ops_enc(ops.permute(0, 2, 1)).squeeze(-1)  # (B, _OPS_HIDDEN)
-            h = torch.cat([h, ops_h], dim=-1)
+        if self.ops_enc is not None and ops is not None:
+            h = torch.cat([h, self.ops_enc(ops)], dim=-1)
+
+        if self.fusion is not None:
+            h = self.fusion(h)
 
         out = self.head(h).squeeze(-1)
         if self.max_rul is not None:

@@ -20,7 +20,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from cyclelayer.models.brayton_cycle import BraytonCycleLayer
-from cyclelayer.models.encoder import SensorEncoder
+from cyclelayer.models.encoder import OpsEncoder, SensorEncoder
 from cyclelayer.models.prognostics import PrognosticsHead
 
 
@@ -131,7 +131,15 @@ class CycleLayerV1Config:
     max_rul: float | None = 125.0
     lambda_theta: float = 0.1             # weight for theta supervision loss
     ops_dim: int = 0                      # 4 for N-CMAPSS W; 0 = no ops path
-    ops_hidden: int = 16                  # output channels of the ops encoder
+    # OpsEncoder settings (only used when ops_dim > 0)
+    # Deliberately lighter than the sensor encoder — ops encode flight regime,
+    # not degradation state.  Future: ops could feed into BraytonLayer directly.
+    ops_enc_channels: list[int] = field(default_factory=lambda: [16, 32])
+    ops_enc_out_dim: int = 32
+    # fusion_hidden_dim > 0 adds a Linear+GELU+LayerNorm projection after
+    # concat([theta_hat, ops_emb]) so the model learns regime-conditioned RUL.
+    # 0 = skip fusion (concat fed directly to PrognosticsHead).
+    fusion_hidden_dim: int = 0
 
 
 class CycleLayerNetV1(nn.Module):
@@ -146,13 +154,19 @@ class CycleLayerNetV1(nn.Module):
 
     Data flow (with ops, ops_dim > 0):
         x (B, T, F)  +  ops (B, T, ops_dim)
-        -> SensorEncoder(x)        -> theta_hat (B, n_health_params)
-        -> OpsEncoder(ops)         -> ops_emb   (B, ops_hidden)
-        -> cat([theta_hat, ops_emb])            (B, n_health_params + ops_hidden)
+        -> SensorEncoder(x)           -> theta_hat (B, n_health_params)  [PRIMARY: physics path]
+        -> OpsEncoder(ops)            -> ops_emb   (B, ops_enc_out_dim)  [CONTEXT: regime path]
+        -> cat([theta_hat, ops_emb])
+        -> [optional fusion projection]
         -> PrognosticsHead
         -> rul (B,)
 
-    forward() returns (rul, theta_hat) to enable CompositeLoss.
+    NOTE on architecture intent: theta_hat (engine health) is the PRIMARY signal.
+    ops_emb provides operating regime CONTEXT — it must not become a shortcut that
+    bypasses the physics encoder.  Future: ops could feed as boundary conditions
+    directly into BraytonLayer (T1, P1 at compressor inlet).
+
+    forward() always returns (rul, theta_hat) for CompositeLoss multi-task training.
 
     Args:
         config: CycleLayerV1Config with all hyper-parameters.
@@ -175,15 +189,30 @@ class CycleLayerNetV1(nn.Module):
             constrain_output=False,       # health params, not Brayton
         )
 
+        # Operating-condition regime encoder (lightweight — regime signal, not degradation)
         if cfg.ops_dim > 0:
-            self.ops_enc = nn.Sequential(
-                nn.Conv1d(cfg.ops_dim, cfg.ops_hidden, kernel_size=3, padding=1),
-                nn.GELU(),
-                nn.AdaptiveAvgPool1d(1),
+            self.ops_enc: OpsEncoder | None = OpsEncoder(
+                ops_dim=cfg.ops_dim,
+                channels=cfg.ops_enc_channels,
+                out_dim=cfg.ops_enc_out_dim,
             )
-            prog_in = cfg.n_health_params + cfg.ops_hidden
+            ops_out = cfg.ops_enc_out_dim
         else:
-            prog_in = cfg.n_health_params
+            self.ops_enc = None
+            ops_out = 0
+
+        # Optional fusion projection after cat([theta_hat, ops_emb])
+        concat_dim = cfg.n_health_params + ops_out
+        if cfg.fusion_hidden_dim > 0 and ops_out > 0:
+            self.fusion: nn.Sequential | None = nn.Sequential(
+                nn.Linear(concat_dim, cfg.fusion_hidden_dim),
+                nn.GELU(),
+                nn.LayerNorm(cfg.fusion_hidden_dim),
+            )
+            prog_in = cfg.fusion_hidden_dim
+        else:
+            self.fusion = None
+            prog_in = concat_dim
 
         self.prognostics = PrognosticsHead(
             in_features=prog_in,
@@ -202,13 +231,14 @@ class CycleLayerNetV1(nn.Module):
             rul:       (B,)
             theta_hat: (B, n_health_params)
         """
-        theta_hat = self.encoder(x)
+        theta_hat = self.encoder(x)   # physics path — PRIMARY
         h = theta_hat
-        if self.ops_dim > 0 and ops is not None:
-            ops_h = self.ops_enc(ops.permute(0, 2, 1)).squeeze(-1)  # (B, ops_hidden)
-            h = torch.cat([theta_hat, ops_h], dim=-1)
+        if self.ops_enc is not None and ops is not None:
+            h = torch.cat([theta_hat, self.ops_enc(ops)], dim=-1)
+        if self.fusion is not None:
+            h = self.fusion(h)
         rul = self.prognostics(h)
-        return rul, theta_hat
+        return rul, theta_hat   # theta_hat always returned for multi-task supervision
 
     @classmethod
     def from_config_dict(cls, d: dict) -> "CycleLayerNetV1":

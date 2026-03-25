@@ -283,3 +283,69 @@ def test_ops_scaler_raises_on_empty():
     ds = _make_synthetic_dataset({1: 20, 2: 20}, window_size=5)
     with pytest.raises(ValueError, match="No rows found"):
         fit_ops_scaler(ds, train_units=[99])
+
+
+# ---------------------------------------------------------------------------
+# 7. OpsEncoder + dual-encoder architecture guard tests
+# ---------------------------------------------------------------------------
+
+def test_ops_encoder_shape():
+    """OpsEncoder maps (B, T, ops_dim) -> (B, out_dim)."""
+    import torch
+    from cyclelayer.models.encoder import OpsEncoder
+
+    enc = OpsEncoder(ops_dim=4, channels=[16, 32], out_dim=32)
+    enc.eval()
+    with torch.no_grad():
+        out = enc(torch.randn(2, 30, 4))
+    assert out.shape == (2, 32), f"Expected (2, 32), got {out.shape}"
+
+
+def test_cnn_baseline_dual_encoder_shape():
+    """CNNBaseline with ops_dim + fusion runs forward and returns correct shape."""
+    import torch
+    from cyclelayer.models.baselines import CNNBaseline
+
+    model = CNNBaseline(
+        n_features=14,
+        ops_dim=4,
+        ops_enc_channels=[16, 32],
+        ops_enc_out_dim=32,
+        fusion_hidden_dim=64,
+    )
+    model.eval()
+    with torch.no_grad():
+        pred = model(torch.randn(2, 30, 14), ops=torch.randn(2, 30, 4))
+    assert pred.shape == (2,), f"Expected (2,), got {pred.shape}"
+
+
+def test_no_ops_backward_compatible():
+    """CNNBaseline with ops_dim=0 must produce identical output regardless of
+    whether new params are passed explicitly or left at defaults."""
+    import torch
+    from cyclelayer.models.baselines import CNNBaseline
+
+    torch.manual_seed(0)
+    model_default = CNNBaseline(n_features=18)          # ops_dim=0 implicitly
+    torch.manual_seed(0)
+    model_explicit = CNNBaseline(n_features=18, ops_dim=0,
+                                 ops_enc_channels=[16, 32],
+                                 ops_enc_out_dim=32,
+                                 fusion_hidden_dim=64)  # ignored when ops_dim=0
+
+    # Both should have identical parameter counts (ops path inactive)
+    params_default  = sum(p.numel() for p in model_default.parameters())
+    params_explicit = sum(p.numel() for p in model_explicit.parameters())
+    assert params_default == params_explicit, (
+        f"ops_dim=0 should produce same param count: {params_default} vs {params_explicit}"
+    )
+
+    # Copy weights and verify identical forward pass
+    model_explicit.load_state_dict(model_default.state_dict())
+    x = torch.randn(2, 30, 18)
+    model_default.eval()
+    model_explicit.eval()
+    with torch.no_grad():
+        assert torch.allclose(model_default(x), model_explicit(x)), (
+            "ops_dim=0 forward outputs differ — backward compatibility broken"
+        )

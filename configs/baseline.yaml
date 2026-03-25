@@ -30,6 +30,14 @@ data:
 model:
   type: "cnn"
 
+  # OpsEncoder settings (only active when data.use_ops: true)
+  # Lighter than the sensor encoder — ops encode flight regime, not degradation state.
+  # Future: ops will feed directly into a BraytonLayer as boundary conditions.
+  ops_enc_channels: [16, 32]    # conv channel depths for OpsEncoder
+  ops_enc_out_dim: 32           # output embedding dimension
+  fusion_hidden_dim: 64         # >0 = add Linear+GELU+LayerNorm fusion after concat;
+                                # 0  = skip fusion (concat fed directly to head)
+
   cnn:
     channels: [64, 128, 128]
     kernel_size: 3

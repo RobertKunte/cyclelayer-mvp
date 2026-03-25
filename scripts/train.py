@@ -104,6 +104,11 @@ def build_model(
     base_type = model_type.replace("_theta", "")
     theta_dim = n_health_params if use_theta else 0
 
+    # OpsEncoder / fusion config (top-level model keys, only used when use_ops: true)
+    ops_enc_channels  = mc.get("ops_enc_channels", None)   # None → OpsEncoder default [16,32]
+    ops_enc_out_dim   = mc.get("ops_enc_out_dim", 32)
+    fusion_hidden_dim = mc.get("fusion_hidden_dim", 0)
+
     if base_type == "cnn":
         c = mc.get("cnn", {})
         return CNNBaseline(
@@ -115,6 +120,9 @@ def build_model(
             max_rul=max_rul,
             theta_true_dim=theta_dim,
             ops_dim=ops_dim,
+            ops_enc_channels=ops_enc_channels,
+            ops_enc_out_dim=ops_enc_out_dim,
+            fusion_hidden_dim=fusion_hidden_dim,
         )
     if base_type == "lstm":
         c = mc.get("lstm", {})
@@ -128,6 +136,9 @@ def build_model(
             max_rul=max_rul,
             theta_true_dim=theta_dim,
             ops_dim=ops_dim,
+            ops_enc_channels=ops_enc_channels,
+            ops_enc_out_dim=ops_enc_out_dim,
+            fusion_hidden_dim=fusion_hidden_dim,
         )
     raise ValueError(f"Unknown model type: {model_type!r}")
 

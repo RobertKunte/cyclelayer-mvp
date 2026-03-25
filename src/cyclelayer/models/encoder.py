@@ -106,3 +106,78 @@ class SensorEncoder(nn.Module):
         if raw.shape[1] > 5:
             parts.append(sig(raw[:, 5:]))
         return torch.cat(parts, dim=1)   # (B, n_theta)
+
+
+# ---------------------------------------------------------------------------
+# OpsEncoder — operating-condition-aware temporal encoder (regime encoder)
+# ---------------------------------------------------------------------------
+
+class OpsEncoder(nn.Module):
+    """Operating-condition-aware temporal encoder (regime encoder).
+
+    Encodes the operating point (altitude, Mach, TRA, T2) as temporal context
+    for the sensor encoder.  Intentionally lighter than SensorEncoder: operating
+    conditions are a regime/context signal, not a degradation signal.
+
+    NOTE: This is an INTERMEDIATE STEP — not a thermodynamic physics layer.
+    Future: ops could feed directly into a BraytonLayer as boundary conditions
+    (e.g. T1, P1 at the compressor inlet), reducing the latent space physically.
+
+    Architecture: Conv1d-BN-GELU stack → temporal pool → Linear projection.
+    Input:  ops (B, T, ops_dim)
+    Output: z_ops (B, out_dim)
+
+    Args:
+        ops_dim: Number of operating condition channels (default 4: alt, Mach, TRA, T2).
+        channels: Conv channel depths.  Defaults to [16, 32] — deliberately lighter
+            than the sensor encoder [32, 64] since ops encode flight regime, not
+            degradation state.
+        out_dim: Output embedding dimension.
+        kernel_size: Convolutional kernel size.
+        dropout: Dropout probability applied before the projection.
+    """
+
+    def __init__(
+        self,
+        ops_dim: int = 4,
+        channels: list[int] | None = None,
+        out_dim: int = 32,
+        kernel_size: int = 3,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        chs: list[int] = channels if channels is not None else [16, 32]
+        layers: list[nn.Module] = []
+        in_ch = ops_dim
+        for ch in chs:
+            layers += [
+                nn.Conv1d(in_ch, ch, kernel_size, padding=kernel_size // 2),
+                nn.BatchNorm1d(ch),
+                nn.GELU(),
+            ]
+            in_ch = ch
+        self.cnn = nn.Sequential(*layers)
+        self.dropout = nn.Dropout(dropout)
+        self.proj = nn.Linear(in_ch, out_dim)
+
+    def _pool(self, h: Tensor) -> Tensor:
+        """Temporal pooling: (B, C, T) → (B, C).
+
+        Current strategy: global mean (AdaptiveAvgPool).
+        Future options to consider: mean+std concat, attention pooling, last-timestep.
+        To extend: override this method or add a ``pooling_mode`` parameter.
+        """
+        return h.mean(dim=-1)
+
+    def forward(self, ops: Tensor) -> Tensor:
+        """Encode an operating-condition window.
+
+        Args:
+            ops: Tensor of shape (B, T, ops_dim).
+
+        Returns:
+            z_ops: Tensor of shape (B, out_dim).
+        """
+        h = self.cnn(ops.permute(0, 2, 1))  # (B, ops_dim, T) → (B, C, T)
+        h = self._pool(h)                   # (B, C)
+        return self.proj(self.dropout(h))   # (B, out_dim)

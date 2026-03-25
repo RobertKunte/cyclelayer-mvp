@@ -42,6 +42,14 @@ model:
   # v1 only: health parameter dimension (N-CMAPSS T_dev has 10 columns)
   n_health_params: 10
 
+  # OpsEncoder settings (only active when data.use_ops: true)
+  # ops encode flight regime, not degradation — kept lighter than sensor encoder.
+  # theta_hat (physics path) remains PRIMARY; ops provide operating context.
+  # Future: ops will feed directly into BraytonLayer as boundary conditions.
+  ops_enc_channels: [16, 32]    # conv channel depths for OpsEncoder
+  ops_enc_out_dim: 32           # output embedding dimension
+  fusion_hidden_dim: 64         # >0 = fusion projection after cat([theta_hat, ops_emb])
+
   # v0 only: Brayton cycle physical constants
   n_theta: 5                    # [T1, pi, T3, eta_c, eta_t]
   gamma: 1.4
