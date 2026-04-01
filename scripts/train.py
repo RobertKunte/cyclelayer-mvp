@@ -42,6 +42,7 @@ from cyclelayer.data.preprocessing import StandardScaler, fit_ops_scaler, fit_se
 from cyclelayer.data.splits import extract_unit_ids, load_splits, make_unit_splits, save_splits, splits_exist
 from cyclelayer.models.baselines import CNNBaseline, LSTMBaseline
 from cyclelayer.models.cycle_layer import CycleLayerNet, CycleLayerNetV1
+from cyclelayer.models.physresnet import OpsResidualNet
 from cyclelayer.training.trainer import Trainer
 
 logging.basicConfig(
@@ -67,6 +68,7 @@ def build_model(
     Supported types:
         cyclelayer        – CycleLayerNet v0 (BraytonCycle)
         cyclelayer_v1     – CycleLayerNetV1 (multi-task health params)
+        cyclelayer_v2     – OpsResidualNet (ops-residual multi-task)
         cnn               – CNNBaseline
         cnn_theta         – CNNBaseline with theta_true concat (upper bound)
         lstm              – LSTMBaseline
@@ -99,6 +101,14 @@ def build_model(
         mc_full.setdefault("max_rul", max_rul)  # same fix as above
         mc_full.setdefault("ops_dim", ops_dim)
         return CycleLayerNetV1.from_config_dict(mc_full)
+
+    if model_type == "cyclelayer_v2":
+        mc_full = dict(mc)
+        mc_full["n_features"] = n_features
+        mc_full.setdefault("n_health_params", n_health_params)
+        mc_full.setdefault("max_rul", max_rul)
+        mc_full.setdefault("ops_dim", ops_dim)
+        return OpsResidualNet.from_config_dict(mc_full)
 
     use_theta = model_type.endswith("_theta")
     base_type = model_type.replace("_theta", "")
@@ -152,7 +162,7 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Path to YAML config file.")
     parser.add_argument(
         "--model",
-        choices=["cyclelayer", "cyclelayer_v1", "cnn", "cnn_theta", "lstm", "lstm_theta"],
+        choices=["cyclelayer", "cyclelayer_v1", "cyclelayer_v2", "cnn", "cnn_theta", "lstm", "lstm_theta"],
         default=None,
         help="Override model.type from config.",
     )
@@ -211,7 +221,7 @@ def main() -> None:
     )
 
     # ── Dataset ───────────────────────────────────────────────────────────────
-    needs_theta = model_type in ("cyclelayer_v1", "cnn_theta", "lstm_theta")
+    needs_theta = model_type in ("cyclelayer_v1", "cyclelayer_v2", "cnn_theta", "lstm_theta")
     stride_train = d.get("stride_train", d.get("stride", 1))
     use_ops = d.get("use_ops", False)
 

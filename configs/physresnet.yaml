@@ -1,0 +1,97 @@
+# OpsResidualNet (cyclelayer_v2) — physics-motivated residual factorization
+#
+# !! GPU config — stride_train=5, num_workers=4, stride_eval=1 !!
+# On CPU this takes ~20 min.  Use cpu_physresnet.yaml for a ~5-min first test.
+#
+# Architecture:
+#   ops  → OpsToSensorBaseline → x_ref (healthy reference)
+#   x_res = x_sens - x_ref             (degradation residual)
+#   x_res → SensorEncoder → h_deg      (PRIMARY: degradation state)
+#   ops  → OpsEncoder     → z_ops      (CONTEXT: flight regime)
+#   cat([h_deg, z_ops]) → fusion → PrognosticsHead → RUL
+#
+# NOTE: baseline_smoothness_weight = 0.0 disables the smoothness penalty.
+# Start at 0 to establish a baseline, then try 1e-3 or 1e-2 to reduce
+# temporal jitter in x_ref if it is observed in plots.
+
+seed: 42
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data:
+  hdf5_path: "data/NCMAPSS/N-CMAPSS_DS01-005.h5"
+  window_size: 30
+  stride_train: 5               # stride for training DataLoader (fewer windows)
+  stride_eval: 1                # stride used by evaluate.py (full trajectory)
+  use_virtual_sensors: false
+  val_split: 0.15
+  test_split: 0.15
+  batch_size: 256
+  num_workers: 4
+  max_rul: 99                   # DS01 RUL range is 0-99
+  use_ops: true                 # REQUIRED: OpsResidualNet needs the ops path
+  # split_dir: "splits/N-CMAPSS_DS01-005"   # uncomment to reuse existing splits
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+model:
+  type: "cyclelayer_v2"
+
+  # Shared dims
+  n_features: 14                # X_s sensors (W excluded when use_ops: true)
+  ops_dim: 4                    # W columns: alt, Mach, TRA, T2
+  window_size: 30
+  n_health_params: 10           # N-CMAPSS T_dev has 10 columns
+
+  # OpsToSensorBaseline (healthy reference estimator)
+  baseline_hidden_dim: 32       # conv channel width
+  baseline_n_layers: 2          # number of Conv-BN-GELU blocks
+
+  # SensorEncoder (encodes degradation residual x - x_ref)
+  cnn_channels: [32, 64, 64]
+  encoder_kernel_size: 3
+  encoder_mlp_hidden: 128
+  encoder_dropout: 0.2
+
+  # OpsEncoder (regime context — lighter than sensor encoder)
+  ops_enc_channels: [16, 32]    # conv channel depths
+  ops_enc_out_dim: 32           # output embedding dimension
+
+  # Fusion projection after cat([h_deg, z_ops])
+  fusion_hidden_dim: 64         # >0 = Linear+GELU+LayerNorm; 0 = concat only
+
+  # PrognosticsHead
+  prog_hidden_sizes: [64, 32]
+  prog_dropout: 0.2
+  max_rul: 99
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  epochs: 50
+  lr: 1.0e-4                    # same as cyclelayer_v1
+  weight_decay: 5.0e-4
+  mse_weight: 1.0
+  asymmetry: 0.1
+
+  # Gradient clipping (important for stability with dense training)
+  grad_clip_norm: 0.5
+
+  # Multi-task theta supervision (h_deg supervised against theta_true)
+  # "delayed" schedule: pure RUL first, then theta supervision ramps in.
+  lambda_theta_start: 1.0
+  lambda_theta_end: 0.1
+  lambda_theta_warmup_epochs: 5
+  lambda_theta_schedule: "delayed"
+  huber_delta: 0.1
+
+  # Baseline smoothness regularization (OpsResidualNet only)
+  # Penalizes temporal jitter in x_ref = OpsToSensorBaseline(ops).
+  # 0.0 = disabled (default).  Try 1e-3 if x_ref plots show flickering.
+  baseline_smoothness_weight: 0.0
+
+  use_amp: true
+  early_stopping_patience: 15
+  output_dir: "runs/physresnet"
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+evaluation:
+  checkpoint: "runs/physresnet/best.pt"
+  alpha: 0.2

@@ -55,7 +55,7 @@ model:
 training:
   epochs: 50
   lr: 3.0e-4                    # 3e-4 recommended for dense training (stride=5)
-  weight_decay: 1.0e-4
+  weight_decay: 5.0e-4          # increased from 1e-4; tighter L2 to reduce train-val gap
   mse_weight: 1.0
   asymmetry: 0.1                # was 0.5; less downward bias on high-RUL predictions
   lambda_theta: 0.0             # 0 = no theta supervision (pure RUL baseline)

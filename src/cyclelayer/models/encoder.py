@@ -181,3 +181,74 @@ class OpsEncoder(nn.Module):
         h = self.cnn(ops.permute(0, 2, 1))  # (B, ops_dim, T) → (B, C, T)
         h = self._pool(h)                   # (B, C)
         return self.proj(self.dropout(h))   # (B, out_dim)
+
+
+# ---------------------------------------------------------------------------
+# OpsToSensorBaseline — ops-conditioned healthy reference predictor
+# ---------------------------------------------------------------------------
+
+class OpsToSensorBaseline(nn.Module):
+    """Maps operating conditions to a healthy-reference sensor prediction.
+
+    Estimates B(ops(t)) ≈ x_healthy(ops(t)): what a healthy engine would
+    measure under the current operating conditions.  The residual
+    x(t) - B(ops(t)) then encodes *only* degradation-driven variation.
+
+    NOTE: This is NOT a thermodynamic physics layer.  It is a learned
+    "ops → healthy baseline" map — an intermediate step before a full
+    BraytonLayer integration.
+
+    Architecture: Conv1d-BN-GELU stack (temporal, no pooling) → 1×1 Conv
+    projection to n_sensors channels.
+
+    Near-zero output init: the final projection weight/bias starts near zero
+    so the model begins training with residual ≈ x_sens (no harmful
+    subtraction at epoch 0).
+
+    Input:  ops   (B, T, ops_dim)
+    Output: x_ref (B, T, n_sensors)
+
+    Args:
+        ops_dim:    Number of operating-condition channels (default 4).
+        n_sensors:  Number of sensor output channels (default 14).
+        hidden_dim: Conv channel width in the hidden layers.
+        n_layers:   Number of Conv-BN-GELU blocks.
+        kernel_size: Convolutional kernel size (padding preserves T).
+    """
+
+    def __init__(
+        self,
+        ops_dim: int = 4,
+        n_sensors: int = 14,
+        hidden_dim: int = 32,
+        n_layers: int = 2,
+        kernel_size: int = 3,
+    ) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        in_ch = ops_dim
+        for _ in range(n_layers):
+            layers += [
+                nn.Conv1d(in_ch, hidden_dim, kernel_size, padding=kernel_size // 2),
+                nn.BatchNorm1d(hidden_dim),
+                nn.GELU(),
+            ]
+            in_ch = hidden_dim
+        self.cnn = nn.Sequential(*layers)
+        # 1×1 conv: projects hidden features to n_sensors; preserves temporal dim
+        self.proj = nn.Conv1d(in_ch, n_sensors, kernel_size=1)
+        # Near-zero init: residual starts ≈ x_sens at epoch 0
+        nn.init.normal_(self.proj.weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.proj.bias)  # type: ignore[arg-type]
+
+    def forward(self, ops: Tensor) -> Tensor:
+        """Predict healthy-reference sensor window from operating conditions.
+
+        Args:
+            ops: Tensor of shape (B, T, ops_dim).
+
+        Returns:
+            x_ref: Tensor of shape (B, T, n_sensors).
+        """
+        h = self.cnn(ops.permute(0, 2, 1))  # (B, C, T)
+        return self.proj(h).permute(0, 2, 1)  # (B, T, n_sensors)

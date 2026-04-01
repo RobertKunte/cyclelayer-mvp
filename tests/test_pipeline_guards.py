@@ -349,3 +349,126 @@ def test_no_ops_backward_compatible():
         assert torch.allclose(model_default(x), model_explicit(x)), (
             "ops_dim=0 forward outputs differ — backward compatibility broken"
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. OpsResidualNet (cyclelayer_v2) guard tests
+# ---------------------------------------------------------------------------
+
+def test_ops_to_sensor_baseline_shape():
+    """OpsToSensorBaseline maps (B, T, ops_dim) -> (B, T, n_sensors)."""
+    import torch
+    from cyclelayer.models.encoder import OpsToSensorBaseline
+
+    baseline = OpsToSensorBaseline(ops_dim=4, n_sensors=14, hidden_dim=32, n_layers=2)
+    baseline.eval()
+    with torch.no_grad():
+        out = baseline(torch.randn(2, 30, 4))
+    assert out.shape == (2, 30, 14), f"Expected (2,30,14), got {out.shape}"
+
+
+def test_ops_to_sensor_baseline_near_zero_init():
+    """OpsToSensorBaseline output must be near zero at initialization."""
+    import torch
+    from cyclelayer.models.encoder import OpsToSensorBaseline
+
+    torch.manual_seed(42)
+    baseline = OpsToSensorBaseline(ops_dim=4, n_sensors=14, hidden_dim=32, n_layers=2)
+    baseline.eval()
+    with torch.no_grad():
+        out = baseline(torch.randn(8, 30, 4))
+    abs_mean = out.abs().mean().item()
+    assert abs_mean < 0.5, (
+        f"Baseline output abs mean {abs_mean:.4f} too large at init — "
+        "near-zero init not applied correctly"
+    )
+
+
+def test_ops_residual_net_forward_shape():
+    """OpsResidualNet forward returns (rul, h_deg) with correct shapes."""
+    import torch
+    from cyclelayer.models.physresnet import OpsResidualNet, OpsResidualNetConfig
+
+    cfg = OpsResidualNetConfig(n_features=14, ops_dim=4, window_size=30, n_health_params=10)
+    model = OpsResidualNet(cfg)
+    model.eval()
+    with torch.no_grad():
+        rul, h_deg = model(torch.randn(2, 30, 14), torch.randn(2, 30, 4))
+    assert rul.shape   == (2,),    f"rul shape: expected (2,), got {rul.shape}"
+    assert h_deg.shape == (2, 10), f"h_deg shape: expected (2,10), got {h_deg.shape}"
+
+
+def test_ops_residual_net_x_ref_stored():
+    """forward() must store _x_ref with correct shape (B, T, n_sensors)."""
+    import torch
+    from cyclelayer.models.physresnet import OpsResidualNet, OpsResidualNetConfig
+
+    cfg = OpsResidualNetConfig(n_features=14, ops_dim=4, window_size=30)
+    model = OpsResidualNet(cfg)
+    model.eval()
+    with torch.no_grad():
+        model(torch.randn(2, 30, 14), torch.randn(2, 30, 4))
+    assert model._x_ref is not None, "_x_ref must be set after forward()"
+    assert model._x_ref.shape == (2, 30, 14), (
+        f"_x_ref shape: expected (2,30,14), got {model._x_ref.shape}"
+    )
+
+
+def test_ops_residual_net_backward():
+    """Gradients must flow through the full OpsResidualNet graph."""
+    import torch
+    from cyclelayer.models.physresnet import OpsResidualNet, OpsResidualNetConfig
+
+    cfg = OpsResidualNetConfig(n_features=14, ops_dim=4, window_size=30, n_health_params=10)
+    model = OpsResidualNet(cfg)
+    model.train()
+    x   = torch.randn(2, 30, 14, requires_grad=False)
+    ops = torch.randn(2, 30, 4,  requires_grad=False)
+    rul, h_deg = model(x, ops)
+    loss = rul.mean() + h_deg.mean()
+    loss.backward()  # must not raise
+    # At least one parameter must have a gradient
+    grads = [p.grad for p in model.parameters() if p.grad is not None]
+    assert len(grads) > 0, "No gradients found after backward()"
+
+
+def test_baseline_smoothness_loss_nonnegative():
+    """CompositeLoss smoothness term must be >= 0."""
+    import torch
+    from cyclelayer.training.losses import CompositeLoss, RULLoss
+
+    crit = CompositeLoss(
+        rul_loss=RULLoss(),
+        lambda_theta=0.1,
+        baseline_smoothness_weight=1.0,
+    )
+    B, T, F = 4, 30, 14
+    rul_pred   = torch.randn(B)
+    rul_true   = torch.randn(B)
+    theta_hat  = torch.randn(B, 10)
+    theta_true = torch.randn(B, 10)
+    x_ref      = torch.randn(B, T, F)
+    total, comps = crit(rul_pred, rul_true, theta_hat, theta_true, x_ref=x_ref)
+    assert "smooth" in comps, "smoothness component missing from loss dict"
+    assert comps["smooth"].item() >= 0.0, "smoothness loss must be non-negative"
+
+
+def test_forward_aux_returns_expected_keys():
+    """forward_aux must return dict with keys: x_ref, x_res, h_deg, z_ops, rul."""
+    import torch
+    from cyclelayer.models.physresnet import OpsResidualNet, OpsResidualNetConfig
+
+    cfg = OpsResidualNetConfig(n_features=14, ops_dim=4, window_size=30)
+    model = OpsResidualNet(cfg)
+    model.eval()
+    with torch.no_grad():
+        aux = model.forward_aux(torch.randn(2, 30, 14), torch.randn(2, 30, 4))
+    expected_keys = {"x_ref", "x_res", "h_deg", "z_ops", "rul"}
+    assert expected_keys == set(aux.keys()), (
+        f"forward_aux keys mismatch: got {set(aux.keys())}"
+    )
+    assert aux["x_ref"].shape == (2, 30, 14)
+    assert aux["x_res"].shape == (2, 30, 14)
+    assert aux["h_deg"].shape == (2, 10)
+    assert aux["z_ops"].shape == (2, 32)
+    assert aux["rul"].shape   == (2,)

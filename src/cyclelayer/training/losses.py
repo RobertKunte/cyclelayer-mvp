@@ -149,19 +149,26 @@ class PhysicsInformedLoss(nn.Module):
 # ---------------------------------------------------------------------------
 
 class CompositeLoss(nn.Module):
-    """Multi-task loss for CycleLayerNetV1.
+    """Multi-task loss for CycleLayerNetV1 and OpsResidualNet (V2).
 
-    L_total = L_rul + lambda_theta * L_theta
+    L_total = L_rul + lambda_theta * L_theta [+ baseline_smoothness_weight * L_smooth]
 
-    L_rul   — RULLoss (MSE + asymmetry).
-    L_theta — Huber loss between theta_hat and theta_true.
-              Huber is more robust to the initial random theta_hat values
-              than plain MSE.
+    L_rul    — RULLoss (MSE + asymmetry).
+    L_theta  — Huber loss between theta_hat and theta_true.
+               Huber is more robust to the initial random theta_hat values
+               than plain MSE.
+    L_smooth — Optional baseline smoothness regularizer (V2 only).
+               L_smooth = mean((x_ref[:,1:,:] - x_ref[:,:-1,:])^2)
+               Prevents the OpsToSensorBaseline from producing high-frequency
+               flickering across timesteps.  Pass x_ref from OpsResidualNet.
+               Weight 0.0 (default) disables this term.
 
     Args:
         rul_loss: Base RULLoss instance.
         lambda_theta: Weight for the health-parameter supervision term.
         huber_delta: Delta parameter for Huber (smooth-L1) loss on theta.
+        baseline_smoothness_weight: Weight for the baseline temporal smoothness
+            penalty.  0.0 = disabled (default).
     """
 
     def __init__(
@@ -169,11 +176,13 @@ class CompositeLoss(nn.Module):
         rul_loss: RULLoss | None = None,
         lambda_theta: float = 0.1,
         huber_delta: float = 0.1,
+        baseline_smoothness_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.rul_loss = rul_loss or RULLoss()
         self.lambda_theta = lambda_theta
         self.huber_delta = huber_delta
+        self.baseline_smoothness_weight = baseline_smoothness_weight
 
     def forward(
         self,
@@ -181,6 +190,7 @@ class CompositeLoss(nn.Module):
         rul_true: Tensor,
         theta_hat: Tensor,
         theta_true: Tensor,
+        x_ref: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Compute composite loss.
 
@@ -189,12 +199,27 @@ class CompositeLoss(nn.Module):
             rul_true:   Ground-truth RUL (B,).
             theta_hat:  Predicted health params (B, n_health_params).
             theta_true: True health params (B, n_health_params).
+            x_ref:      Optional baseline output (B, T, n_sensors) from
+                        OpsResidualNet.  Required for L_smooth; ignored when
+                        baseline_smoothness_weight == 0.
 
         Returns:
             total: Scalar loss.
-            components: Dict with keys "rul" and "theta".
+            components: Dict with keys "rul", "theta", and optionally "smooth".
         """
         L_rul   = self.rul_loss(rul_pred, rul_true)
         L_theta = F.huber_loss(theta_hat, theta_true, delta=self.huber_delta)
         total   = L_rul + self.lambda_theta * L_theta
-        return total, {"rul": L_rul.detach(), "theta": L_theta.detach()}
+        components: dict[str, Tensor] = {
+            "rul":   L_rul.detach(),
+            "theta": L_theta.detach(),
+        }
+
+        if x_ref is not None and self.baseline_smoothness_weight > 0.0:
+            # Penalize temporal jitter in the baseline: finite differences
+            # along the time axis.  (B, T-1, n_sensors)
+            L_smooth = (x_ref[:, 1:, :] - x_ref[:, :-1, :]).pow(2).mean()
+            total = total + self.baseline_smoothness_weight * L_smooth
+            components["smooth"] = L_smooth.detach()
+
+        return total, components

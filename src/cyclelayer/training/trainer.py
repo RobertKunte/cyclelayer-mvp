@@ -72,6 +72,7 @@ Gradient clipping
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -186,6 +187,7 @@ class Trainer:
                 rul_loss=rul_loss,
                 lambda_theta=lambda_theta,
                 huber_delta=c.get("huber_delta", 0.1),
+                baseline_smoothness_weight=c.get("baseline_smoothness_weight", 0.0),
             )
         use_physics = c.get("use_physics_loss", False)
         if use_physics:
@@ -276,12 +278,13 @@ class Trainer:
             if isinstance(self.criterion, CompositeLoss):
                 lam_str = f"  lam_th={self.criterion.lambda_theta:.3f}"
 
+            skip_rate = train_stats.get("amp_skip_rate", 0.0)
             logger.info(
                 f"Epoch {epoch:3d}/{epochs}  "
                 f"train={train_loss:.4f}  val={val_loss:.4f}  "
                 f"val_mae={val_stats['mae']:.2f}  "
                 f"val_r={val_stats.get('pearson_r', float('nan')):.3f}  "
-                f"gnorm={avg_grad_norm:.3f}"
+                f"gnorm={avg_grad_norm:.3f}  skip={skip_rate:.1%}"
                 f"{lam_str}  "
                 f"lr={current_lr:.2e}  "
                 f"({elapsed:.1f}s)"
@@ -355,7 +358,11 @@ class Trainer:
         self.model.train()
         total_loss     = 0.0
         comp_totals: dict[str, float] = {}
-        total_grad_norm = 0.0
+        # finite_norms: only accumulate when gnorm is a real number.
+        # AMP skips the optimizer step when any gradient is inf/nan; those batches
+        # produce gnorm=inf and must not pollute the epoch average.
+        finite_norms: list[float] = []
+        n_skipped = 0   # AMP-skipped steps (inf gradient detected)
 
         # Prediction stats accumulated per-batch (cheap, stays on device)
         total_mae  = 0.0
@@ -380,7 +387,11 @@ class Trainer:
             grad_norm_tensor = nn.utils.clip_grad_norm_(
                 self.model.parameters(), max_norm=clip_max
             )
-            total_grad_norm += grad_norm_tensor.item()
+            gn = grad_norm_tensor.item()
+            if math.isfinite(gn):
+                finite_norms.append(gn)
+            else:
+                n_skipped += 1
 
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -410,12 +421,16 @@ class Trainer:
             )
 
         n = len(self.train_loader)
-        avg_comps = {k: v / n for k, v in comp_totals.items()}
+        avg_comps    = {k: v / n for k, v in comp_totals.items()}
+        avg_grad_norm = sum(finite_norms) / len(finite_norms) if finite_norms else float("inf")
         train_stats = {
-            "mae":  total_mae  / max(n_batches, 1),
-            "bias": total_bias / max(n_batches, 1),
+            "mae":           total_mae  / max(n_batches, 1),
+            "bias":          total_bias / max(n_batches, 1),
+            # Fraction of steps skipped by AMP GradScaler due to inf/nan gradients.
+            # > 0.05 (5%) indicates persistent overflow → lower init_scale or LR.
+            "amp_skip_rate": n_skipped / max(n_batches, 1),
         }
-        return total_loss / n, avg_comps, total_grad_norm / n, train_stats
+        return total_loss / n, avg_comps, avg_grad_norm, train_stats
 
     @torch.no_grad()
     def _val_epoch(
@@ -601,9 +616,14 @@ class Trainer:
         else:
             rul_pred = model_out
 
+        # Read x_ref stored by OpsResidualNet during forward (None for all other models)
+        x_ref = getattr(self.model, "_x_ref", None)
+
         # Loss computation
         if multitask and theta_true is not None and isinstance(self.criterion, CompositeLoss):
-            loss, components = self.criterion(rul_pred, rul_true, theta_hat, theta_true)
+            loss, components = self.criterion(
+                rul_pred, rul_true, theta_hat, theta_true, x_ref=x_ref
+            )
 
         elif isinstance(self.criterion, PhysicsInformedLoss):
             if hasattr(self.model, "forward_with_intermediates"):

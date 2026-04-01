@@ -36,7 +36,7 @@ model:
   encoder_mlp_hidden: 128
   encoder_dropout: 0.2
   prog_hidden_sizes: [64, 32]
-  prog_dropout: 0.1
+  prog_dropout: 0.2             # increased from 0.1; regularises the prognostics head
   max_rul: 99
 
   # v1 only: health parameter dimension (N-CMAPSS T_dev has 10 columns)
@@ -60,7 +60,7 @@ training:
   epochs: 50
   lr: 1.0e-4                    # 1e-4: reduced from 3e-4 to fix gnorm=NaN at epoch 1
                                 # use 1e-3 only for very sparse stride (>=100)
-  weight_decay: 1.0e-4
+  weight_decay: 5.0e-4          # increased from 1e-4; tighter L2 to reduce train-val gap
   mse_weight: 1.0
   asymmetry: 0.1                # was 0.5; less downward bias on high-RUL predictions
 
