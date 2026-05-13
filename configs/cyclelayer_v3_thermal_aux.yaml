@@ -1,0 +1,204 @@
+# =============================================================================
+# CycleLayer V3.1b — THERMAL AUXILIARY config (NOT EPR-validated)
+# =============================================================================
+#
+# Configuration profile name:  thermal_regularizer_v3_1b_not_epr_validated
+#
+# Source: docs/decisions/ADR-0012-v3-thermal-auxiliary-scope.md (accepted
+# 2026-05-12). Scope: V3.1b is a differentiable thermal AUXILIARY physics
+# layer, NOT a full pressure/EPR-validated cycle model. Pressure validation
+# moves to V4 (flow matching + nozzles + iterative shaft balance).
+#
+# This config is chosen for NUMERICAL AND THERMAL STABILITY of the
+# auxiliary layer at FC02 in the explicit-closure V3.1b architecture
+# (BPR=5.5, Wc_fan_design=900 kg/s "D-like baseline"). The C0d diagnostic
+# showed that documented C-MAPSS reference values (BPR=8.4,
+# Wc_fan_design=1658, OPR=36) produce unphysical T50 (~482 K) and PR_lpt
+# (~22) under V3.1b's closure. The stable baseline below produces
+# physically reasonable T45 anchor (err < 3 %), T50 (~863 K, within
+# plausibility window), and PR_lpt (~4.1).
+#
+# This is NOT presented as a C-MAPSS EPR-valid design point.
+# Pressure / EPR are NOT used in any loss for V3.1b.
+# =============================================================================
+
+profile_name: thermal_regularizer_v3_1b_not_epr_validated
+scope: |
+  Differentiable thermal auxiliary layer. Trained with T-only physics
+  consistency. No P30/Ps30/P50/EPR in loss. Theta_phys learned without
+  health-parameter GT (post-hoc evaluation only).
+
+# -----------------------------------------------------------------------------
+# Model
+# -----------------------------------------------------------------------------
+model:
+  type: cyclelayer_v3
+
+  # SensorEncoder
+  encoder:
+    type: cnn1d
+    channels: [32, 64, 64]
+    kernel_size: 5
+    dropout: 0.2
+    # Target-sensor masking: AFTER normalization, set to 0.0 in normalized
+    # feature space, training only.  Indices refer to X_s columns in DS02:
+    #   T24=0, T30=1, T48=2, T50=3, Ps30=8 (Ps30 NOT a V3.1b L_temp target).
+    mask_target_sensor_prob: 0.5
+    target_sensor_indices: [0, 1, 3]   # T24, T30, T50
+
+  # OpsEncoder (optional, lighter regime context)
+  ops_encoder:
+    enabled: true
+    channels: [16, 32]
+    out_dim: 32
+
+  # ParamHead_phys — 5-dim θ in factor space [0.85, 1.00]
+  param_head_phys:
+    hidden: [64, 32]
+    theta_dim: 5
+    representation: factor
+    bounds: [0.85, 1.00]
+    initial_theta_target: 0.99    # bias init so initial θ ≈ 0.99
+
+  # AuxHealthHead — supervised LPT_flow_mod (delta, small weight, normalised)
+  aux_health_head:
+    hidden: [32]
+    representation: delta
+    output_bounds: [-0.05, 0.02]
+    initial_value_target: 0.0     # bias init so initial output ≈ 0.0
+    detach_for_rul: true           # detach from RUL grad path (V3.1a P5 default)
+
+  # PrognosticsHead
+  prognostics_head:
+    hidden: [64, 32]
+    dropout: 0.2
+    use_theta_in_rul: true        # concat θ_phys into RUL features
+    detach_theta_to_rul: false    # configurable; false by default
+
+  # ----------------------------------------------------------------------
+  # BraytonEngine (thermal-stable baseline; NOT C-MAPSS EPR-valid)
+  # ----------------------------------------------------------------------
+  # Chosen for numerical and thermal stability of the auxiliary layer; not
+  # a C-MAPSS EPR-valid design. See ADR-0012 and C0d artifacts.
+  brayton_engine:
+    use_measured_inlet: true       # V3.1a P1: skip ETA_INLET on measured P2
+
+    # ASSUMPTIONS — fixed for V3.1b thermal-aux; no further tuning.
+    bpr_design: 5.5                # CFM56-ish, NOT C-MAPSS-90k BPR=8.4
+    eta_design_hpt: 0.90
+    eta_design_lpt: 0.92
+
+    inlet_flow:
+      Wc_fan_design: 900.0         # kg/s — thermal-stable, NOT documented C-MAPSS 1658
+      Nc_fan_design: 2388.1        # corrected_speed(2403, T2_FC02_K)
+      c1: 0.85                     # generic literature sensitivity
+      c2: -0.20                    # generic literature curvature
+      Wc_min: 100.0                # safety bound
+      Wc_max: 1100.0               # safety bound
+
+    map_coeffs:
+      # Required design points — all explicit, no hidden defaults.
+      Nc_design_fan: 2388.1
+      Wc_design_fan: 900.0
+      Nc_design_lpc: 2388.1        # LP shaft, same as fan
+      Wc_design_lpc: 93.06         # derived at fan-discharge design state
+      Nc_design_hpc: 7529.45       # corrected to T24_design
+      Wc_design_hpc: 51.88         # derived at LPC-discharge design state
+
+      # Design pressure ratios — literature defaults (Walsh & Fletcher Tab. 5.3)
+      PR_design_fan: 1.6
+      PR_design_lpc: 2.0
+      PR_design_hpc: 12.0
+
+      # Design efficiencies — literature defaults (no hidden defaults)
+      eta_design_fan: 0.92
+      eta_design_lpc: 0.90
+      eta_design_hpc: 0.88
+
+      # Generic literature sensitivities (fixed shape parameters)
+      pr_a1: 0.10
+      pr_a2: -0.05
+      pr_b1: -0.08
+      pr_b2: -0.03
+      eta_e1: 0.05
+      eta_e2: 0.03
+
+  # ----------------------------------------------------------------------
+  # Pressure proxy (DIAGNOSTIC only in V3.1b — NEVER in any loss)
+  # ----------------------------------------------------------------------
+  pressure_proxy:
+    M30_proxy: 0.30
+    diagnostic_only: true   # enforced by the loss module
+
+# -----------------------------------------------------------------------------
+# Data
+# -----------------------------------------------------------------------------
+data:
+  hdf5_path: "data/NCMAPSS/N-CMAPSS_DS02-006.h5"
+  load_in_memory: false             # lazy by default (V3.1b clarification 3)
+
+  window_size: 50
+  stride_train: 5
+  stride_eval: 1
+
+  # Unit-level split (DS02 dev = [2, 5, 10, 16, 18, 20]; test = [11, 14, 15])
+  train_units: [2, 5, 10, 16]
+  val_units:   [18, 20]
+  test_units:  [11, 14, 15]         # for later evaluation; NOT for tuning
+
+  health_modifier_format: delta     # how N-CMAPSS GT is stored (delta around 0)
+
+  # Per-sensor σ for L_temp normalization — computed from train_units at
+  # script startup. Stored here for reference / override.
+  sigma_T24_K: null                 # auto-computed from train split
+  sigma_T30_K: null                 # auto-computed
+  sigma_T50_K: null                 # auto-computed
+  sigma_lpt_flow: 0.02              # config default for L_aux
+
+# -----------------------------------------------------------------------------
+# Loss (thermal auxiliary — pressure / EPR FORBIDDEN)
+# -----------------------------------------------------------------------------
+loss:
+  lambda_rul:     1.0
+  lambda_temp:    0.1
+  lambda_aux:     0.02
+  lambda_healthy: 0.05
+  lambda_smooth:  1.0e-3
+  healthy_rul_threshold: 80
+
+  # Asymmetric RUL loss settings
+  rul:
+    mse_weight: 1.0
+    asymmetry: 0.1                  # reduces systematic over-estimation
+
+  # Temperature targets (T24, T30, T50 ONLY — no pressure!)
+  temp_sensors: ["T24", "T30", "T50"]
+
+  # Pressure / EPR — FORBIDDEN in V3.1b. The loss module asserts these are
+  # False at construction. Changing them requires an ADR + code change.
+  use_pressure_loss: false
+  use_epr_loss: false
+
+# -----------------------------------------------------------------------------
+# Training
+# -----------------------------------------------------------------------------
+training:
+  lr: 1.0e-4
+  weight_decay: 5.0e-4
+  batch_size: 256
+  max_epochs: 2                     # SMOKE default; full run requires approval
+  max_train_samples: 20000          # tiny smoke; null = use all
+  max_val_samples:   4000
+  grad_clip_norm: 0.5
+  amp: true
+  early_stopping_patience: 5
+  output_dir: "artifacts/cyclelayer_v3/thermal_aux_smoke"
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+evaluation:
+  checkpoint: "artifacts/cyclelayer_v3/thermal_aux_smoke/best.pt"
+  alpha: 0.2
+  ema_alpha: 0.5
+  theta_diag_output_dir: "artifacts/cyclelayer_v3/thermal_aux_smoke/theta_diagnostics"

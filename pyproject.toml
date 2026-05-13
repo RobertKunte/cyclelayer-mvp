@@ -41,6 +41,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+# Ensure repo root is on sys.path so `from tests.test_dataset import ...` works
+# on Linux/Colab containers as well as on Windows.  See conftest.py.
+pythonpath = ["."]
 
 [tool.ruff]
 src = ["src"]

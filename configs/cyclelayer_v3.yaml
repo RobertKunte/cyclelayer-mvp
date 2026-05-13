@@ -1,0 +1,186 @@
+# =============================================================================
+# CycleLayer V3.1b — BraytonEngine + Hybrid Prognostics
+# =============================================================================
+#
+# Single source of truth: docs/CycleLayer_V3.1b_Master_Spec.md (Mai 2026, Rev 3.1b)
+#
+# This file is INCOMPLETE on purpose. The fields marked `null  # TBD Phase C0`
+# below must be filled by Phase C0 (UserGuide FC02 anchor configuration)
+# before BraytonEngine.from_config_dict() can construct an engine instance.
+#
+# Phase C validates fixed configuration; NO DS02 tuning allowed.
+# Phase C is C0 -> C1 -> C2:
+#   C0: anchor design points to UserGuide FC02 (one flight condition only)
+#   C1: validate on the other 13 UserGuide FCs (no tuning)
+#   C2: validate on DS02 (no retuning)
+#
+# Source for the FC02 anchor values: NASA/TM-2007-215026 Tab. 1.4.
+# Anchor extracted on:  YYYY-MM-DD  (filled in Phase C0)
+# Source: <NASA-TM-2007-215026, Tab. 1.4, FC02 row>
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# UserGuide FC02 anchor reference values (read-only — for Phase C0/C1)
+# -----------------------------------------------------------------------------
+# SLS, Mach 0.25, TRA 100%, Standard-Day (59 °F).
+# These values are USED IN PHASE C0 to compute the design points below.
+# Net Thrust is recorded for completeness but NOT validated in V3.1b
+# (nozzle modeling is out of scope).
+userguide_fc02:
+  alt_ft:           0
+  XM:               0.25
+  TRA_pct:          100
+  Tsl_F:            59
+  Wf_pps:           7.085
+  Nf_rpm:           2403
+  Nc_rpm:           9084
+  EPR_ref:          1.261     # P50/P2 per CMAPSS convention (Tab 1.2 idx 3)
+  T48_ref_R:        2083      # used as PROXY for T45_pred
+  Net_Thrust_lbf:   66755     # IGNORED — nozzle not modeled in V3.1b
+  # T2 and P2 at FC02 conditions (computed from ISA SL Standard-Day):
+  #   T2_R = 518.67  (ISA SL, no ram correction needed for static comparison)
+  #   P2_psia = 14.696 * (1 + 0.5*0.4*0.25^2)^(1.4/0.4) ≈ 15.35
+  T2_R_anchor:      518.67
+  P2_psia_anchor:   15.35
+
+# =============================================================================
+# Model
+# =============================================================================
+model:
+  type: cyclelayer_v3
+
+  encoder:
+    type: cnn1d
+    channels: [32, 64, 64]
+    kernel: 5
+    mask_target_sensors_prob: 0.5      # P6: mask T24/T30/P30/T50 in training
+
+  param_head_phys:
+    hidden: [64, 32]
+    theta_dim: 5
+    representation: factor              # P4: internal factor [0.85, 1.00]
+    bounds: [0.85, 1.00]
+
+  aux_health_head:
+    hidden: [32]
+    representation: delta               # P4: explicit delta around 0
+    output_bounds: [-0.05, 0.02]
+    detach_for_rul: true                # P5: default detach for prognostics
+
+  prognostics_head:
+    hidden: [64, 32]
+
+  # ---------------------------------------------------------------------------
+  # BraytonEngine configuration
+  # ---------------------------------------------------------------------------
+  # Phase 0 fixed assumptions (Walsh & Fletcher / Kurzke / Frederick 2007).
+  # These are CONSCIOUS DESIGN CHOICES set explicitly here. They are inputs
+  # to the FC02 anchor procedure (single solved parameter is Wc_fan_design),
+  # not adjusted by it. They are FROZEN for the rest of the pipeline; Phase
+  # C0/C1/C2 must not change them.
+  brayton_engine:
+    use_measured_inlet: true            # P1: skip ETA_INLET on measured P2
+
+    # ASSUMPTION (CMAPSS-90K-class generic high-bypass turbofan):
+    bpr_design: 5.5
+
+    # ASSUMPTION (Walsh & Fletcher / Kurzke generic; literature defaults):
+    eta_design_hpt: 0.90                # P8: separated from LPT
+    eta_design_lpt: 0.92                # P8: separated from HPT
+    # Note: eta_design_fan/lpc/hpc are constants in stations.py (0.92, 0.90, 0.88).
+
+    # -------------------------------------------------------------------------
+    # Inlet flow estimator (V3.1a Patch P2)
+    # Wc_fan_design is the SINGLE parameter solved by the FC02 anchor procedure.
+    # Nc_fan_design is computed from FC02 (Nf=2403 rpm at T2_R=518.67).
+    # -------------------------------------------------------------------------
+    inlet_flow:
+      Wc_fan_design: null               # TBD Phase C0 — solved one-point fit at FC02
+      Nc_fan_design: null               # TBD Phase C0 — corrected_speed(2403, T2_FC02_K)
+      c1: 0.85                          # generic literature sensitivity (fixed shape param)
+      c2: -0.20                         # generic literature curvature (fixed shape param)
+      Wc_min: 100.0                     # safety bound
+      Wc_max: 1100.0                    # safety bound
+
+    # -------------------------------------------------------------------------
+    # Component map coefficients
+    # All required design points (Nc_design_*, Wc_design_*, PR_design_*) are
+    # TBD until Phase C0 fills them in. Even if PR values coincide with
+    # literature defaults (Walsh & Fletcher Tab. 5.3 / Kurzke generic), they
+    # must be set HERE EXPLICITLY in C0 — no silent in-code defaults are
+    # allowed. The sensitivity coefficients (pr_a*, eta_e*) keep generic
+    # literature defaults and stay fixed.
+    # Phase C validates fixed configuration; no DS02 tuning allowed.
+    # -------------------------------------------------------------------------
+    map_coeffs:
+      # ── Required design corrected speeds (rpm) ──
+      Nc_design_fan: null               # TBD Phase C0 — = Nf_FC02 / sqrt(T2_FC02 / T_REF)
+      Nc_design_lpc: null               # TBD Phase C0 — LP shaft; = Nc_design_fan
+      Nc_design_hpc: null               # TBD Phase C0 — = Nc_FC02 / sqrt(T24_design / T_REF)
+
+      # ── Required design corrected flows (kg/s) ──
+      # Wc_design_fan is THE single solved parameter from the FC02 anchor
+      # procedure. Wc_design_lpc and Wc_design_hpc are derived from it via
+      # bpr_design and station thermodynamics at design.
+      Wc_design_fan: null               # TBD Phase C0 — single solved parameter (anchor)
+      Wc_design_lpc: null               # TBD Phase C0 — derived from m_core_design at LPC inlet
+      Wc_design_hpc: null               # TBD Phase C0 — derived at HPC inlet
+
+      # ── Required design pressure ratios ──
+      # ASSUMPTION (Walsh & Fletcher Tab. 5.3 / Kurzke generic):
+      # Phase C0 sets these EXPLICITLY even if values coincide with literature
+      # defaults (1.6 / 2.0 / 12.0). No silent default is allowed.
+      PR_design_fan: null               # TBD Phase C0 — Walsh & Fletcher generic 1.6
+      PR_design_lpc: null               # TBD Phase C0 — Walsh & Fletcher generic 2.0
+      PR_design_hpc: null               # TBD Phase C0 — CMAPSS-class generic 12.0
+
+      # Generic literature sensitivities (fixed shape parameters, no engine specifics)
+      pr_a1: 0.10
+      pr_a2: -0.05
+      pr_b1: -0.08
+      pr_b2: -0.03
+      eta_e1: 0.05
+      eta_e2: 0.03
+
+  # ---------------------------------------------------------------------------
+  # Pressure proxy for DS02 Ps30 vs BraytonEngine P30 (total)
+  # ---------------------------------------------------------------------------
+  pressure_proxy:
+    M30_proxy: 0.30                     # assumed flow Mach number at HPC discharge
+
+# =============================================================================
+# Data
+# =============================================================================
+data:
+  hdf5_path: "data/NCMAPSS/N-CMAPSS_DS02-006.h5"
+  use_ops: true
+  use_lpt_flow_truth: true
+  window_size: 50
+  stride: 1
+  health_modifier_format: delta         # P4: how N-CMAPSS GT is stored
+
+# =============================================================================
+# Training
+# =============================================================================
+training:
+  lr: 1.0e-4
+  batch_size: 256
+  max_epochs: 60
+  grad_clip_norm: 0.5
+  amp: true
+  early_stopping_patience: 10
+  loss_weights:
+    rul:     1.0
+    sens:    0.5
+    aux:     0.05
+    healthy: 0.10
+    smooth:  1.0e-3
+  healthy_rul_threshold: 80
+  output_dir: "runs/cyclelayer_v3"
+
+# =============================================================================
+# Evaluation
+# =============================================================================
+evaluation:
+  checkpoint: "runs/cyclelayer_v3/best.pt"
+  alpha: 0.2
