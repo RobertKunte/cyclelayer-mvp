@@ -190,3 +190,39 @@ After each implementation step:
 * EPR / pressure validation as a V3.1b acceptance gate
 * DS02 cycle-level cross-check as a V3.1b acceptance gate
 * Full training without approval
+
+## θ identifiability test phase (2026-05-13, ADR-0013)
+
+After the first experiment-matrix run on Colab (RUN_ID `20260513_090332`),
+two findings demand a *falsifiable* identifiability test before any further
+claim is made about θ_η_hpt / θ_η_lpt as physics-interpretable health
+parameters:
+
+* Pearson correlations of strong magnitude (|r| 0.7–0.85) but **wrong sign**
+  on the test split.
+* `D shuffled-θ` ablation ΔRMSE ≈ 0 — the prognostics head is not using θ.
+
+[ADR-0013](decisions/ADR-0013-v31b-theta-identifiability-tests.md) defines
+the required diagnostic suite. Scripts:
+
+| # | Script | Question answered |
+|---|---|---|
+| 2 | `scripts/diagnose_v31b_theta_local_sensitivity.py` | Do HPT/LPT θ affect any *temperature* output materially? |
+| 3 | `scripts/diagnose_v31b_loss_gradient_paths.py` | Does L_temp produce gradient into θ_η_hpt / θ_η_lpt? |
+| 4 | `scripts/diagnose_v31b_theta_partial_correlations.py` | Does θ-vs-GT Pearson survive after controlling for RUL/cycle/ops? |
+| 5 | `scripts/inspect_ncmapss_health_sign_convention.py` | What does "degraded" mean numerically in HPT_eff_mod etc.? |
+| 6 | `scripts/diagnose_v31b_rul_theta_usage.py` | Does the prognostics head actually use θ_phys? |
+| 7 | `scripts/test_v31b_synthetic_theta_recovery.py` | In a controlled synthetic inverse problem, can θ be recovered from T-only vs T+P targets? |
+| 8 | (summary) | Aggregates 2–7 into `IDENTIFIABILITY_SUMMARY.md` with a PASS / WEAK / FAIL verdict |
+
+Outputs land under `artifacts/cyclelayer_v3/theta_identifiability/`.
+
+The verdict drives one of two follow-ups, both of which are options under
+ADR-0012 already — choice is Robert's:
+
+* **A** — limit V3.1b to identifiable compressor θ only; drop HPT/LPT θ
+  identification from the pitch.
+* **B** — move HPT/LPT η identification to V4 (pressure / EPR / flow
+  matching).
+
+No third option. **No further parameter tuning, no eta below 0.88.**

@@ -57,6 +57,11 @@ CELLS.append(md(
     "* No supervised L_θ on θ_phys",
     "* No DS02 tuning / no fit_* helpers / no auto parameter selection",
     "",
+    "After the comparison, an **identifiability diagnostic phase** (ADR-0013)",
+    "runs 7 read-only Tasks to determine whether `θ_η_hpt` / `θ_η_lpt` are",
+    "physically identifiable from V3.1b's temperature-only loss. The phase",
+    "produces `IDENTIFIABILITY_SUMMARY.md` with a PASS / WEAK / FAIL verdict.",
+    "",
     "## Quick-start",
     "1. Runtime → Change runtime type → **GPU** (T4 / L4 / A100 OK)",
     "2. Edit USER CONFIG in Cell 2 (repo URL, HDF5 path on Drive)",
@@ -809,6 +814,143 @@ CELLS.append(code(
 # Cell — Save to Drive
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# Identifiability diagnostic phase (ADR-0013)
+# -----------------------------------------------------------------------------
+
+CELLS.append(md(
+    "# Identifiability diagnostics (ADR-0013)",
+    "",
+    "Following the experiment matrix above (Run C produced strong-magnitude but",
+    "*wrong-sign* Pearson and the D-ablation showed θ has no RUL effect),",
+    "[ADR-0013](docs/decisions/ADR-0013-v31b-theta-identifiability-tests.md) requires",
+    "a structured diagnostic suite before any further claim about HPT/LPT θ",
+    "identifiability.  The cells below run all seven Tasks and aggregate the verdict.",
+    "",
+    "Hard constraints (enforced by the scripts):",
+    "* No DS02 / C0 / C1 / C2 parameter tuning",
+    "* No YAML physical-constant writes",
+    "* No `fit_*` helper on real data (synthetic recovery is the only optimisation, and only on synthetic targets)",
+    "* No supervised L_θ on θ_phys",
+    "* Pressure / EPR loss remains disabled in the V3.1b training path",
+    "",
+    "Outputs land under `artifacts/cyclelayer_v3/theta_identifiability/`.",
+))
+
+CELLS.append(code(
+    "# Helper — run a script via subprocess with clean output streaming",
+    "def _run_diag(script, args=()):",
+    "    cmd = [sys.executable, script, *map(str, args)]",
+    "    print('$', ' '.join(cmd))",
+    "    res = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True)",
+    "    # show last lines of stdout for context",
+    "    lines = res.stdout.splitlines()",
+    "    for line in lines[-25:]:",
+    "        print(line)",
+    "    if res.returncode != 0:",
+    "        print('-- STDERR --')",
+    "        for line in res.stderr.splitlines()[-30:]:",
+    "            print(line)",
+    "    return res.returncode == 0",
+    "",
+    "# Latest C-run dir (used by Tasks 4 + 6)",
+    "C_RUN_DIR = RUN_DIR_C = Path(RUN_CFGS['C_physics_theta_rul']['training']['output_dir'])",
+    "print(f'C run dir: {C_RUN_DIR}')",
+    "print(f'C best.pt exists: {(C_RUN_DIR / \"best.pt\").exists()}')",
+))
+
+CELLS.append(md(
+    "## Task 2 — Local sensitivity Jacobian",
+    "",
+    "Measures `d{T, P, PR, EPR} / dθ` at FC02 + DS02 sample points via autograd."
+    " Establishes whether each θ has measurable effect on temperature vs"
+    " pressure outputs.",
+))
+CELLS.append(code(
+    "_run_diag('scripts/diagnose_v31b_theta_local_sensitivity.py')",
+))
+
+CELLS.append(md(
+    "## Task 3 — Loss gradient pathways",
+    "",
+    "Measures `∂L_temp / ∂θ` (and per-component gradient norms for L_rul, L_aux,"
+    " L_healthy, L_smooth, L_total) on a synthetic batch + DS02 batch.",
+))
+CELLS.append(code(
+    "_run_diag('scripts/diagnose_v31b_loss_gradient_paths.py')",
+))
+
+CELLS.append(md(
+    "## Task 5 — N-CMAPSS sign convention",
+    "",
+    "Confirms what 'degraded' means numerically for the 10 health modifiers"
+    " across DS02 unit life. Sets the EXPECTED sign of `Pearson(θ−1, GT)`.",
+))
+CELLS.append(code(
+    "_run_diag('scripts/inspect_ncmapss_health_sign_convention.py')",
+))
+
+CELLS.append(md(
+    "## Task 4 — Partial correlations",
+    "",
+    "Raw vs residualised `Pearson(θ, GT)` controlling for {RUL, cycle, ops, combinations}."
+    " If raw |r| > 0.6 and partial |r| < 0.2 → strong evidence of time/RUL-axis artifact.",
+    "",
+    "*(Uses the C run's checkpoint — auto-discovers `/content/runs_v3_thermal_aux/<RUN_ID>_C_physics_theta_rul/`.)*",
+))
+CELLS.append(code(
+    "_run_diag('scripts/diagnose_v31b_theta_partial_correlations.py',",
+    "          args=['--run_dir', str(C_RUN_DIR)])",
+))
+
+CELLS.append(md(
+    "## Task 6 — Does the RUL head use θ_phys?",
+    "",
+    "Perturbation tests: {real, shuffle_batch, shuffle_within_unit, shuffle_across_units,"
+    " constant_healthy, constant_lo}. Reports ΔRMSE per variant + the first PrognosticsHead"
+    " Linear's column-norm on the θ slots.",
+    "",
+    "*(Uses the C run's checkpoint.)*",
+))
+CELLS.append(code(
+    "_run_diag('scripts/diagnose_v31b_rul_theta_usage.py',",
+    "          args=['--run_dir', str(C_RUN_DIR)])",
+))
+
+CELLS.append(md(
+    "## Task 7 — Synthetic θ recovery (CONSTRUCTIVE TEST)",
+    "",
+    "On synthetic data only: known θ → BraytonEngine → outputs → optimise θ_pred to match."
+    " Two target sets:",
+    "* **Case A:** {T24, T30, T50} only (mirrors V3.1b L_temp)",
+    "* **Case B:** {T24, T30, T50, P30, P50} (V4-style)",
+    "",
+    "Expected if the V3.1b architecture is the bottleneck: HPT/LPT θ do not recover in A but do in B."
+    " This is **independent of any trained model or DS02** — pure constructive proof.",
+))
+CELLS.append(code(
+    "_run_diag('scripts/test_v31b_synthetic_theta_recovery.py')",
+))
+
+CELLS.append(md(
+    "## Task 8 — Aggregate verdict",
+    "",
+    "Combines Tasks 2-7 into `IDENTIFIABILITY_SUMMARY.md` with the ADR-0013 "
+    "PASS / WEAK / FAIL verdict per θ channel and answers to the five questions.",
+))
+CELLS.append(code(
+    "_run_diag('scripts/build_identifiability_summary.py')",
+    "",
+    "# Display the summary inline",
+    "summary_md = REPO_ROOT / 'artifacts' / 'cyclelayer_v3' / 'theta_identifiability' / 'IDENTIFIABILITY_SUMMARY.md'",
+    "if summary_md.exists():",
+    "    from IPython.display import Markdown, display",
+    "    display(Markdown(summary_md.read_text(encoding='utf-8')))",
+    "else:",
+    "    print('SUMMARY NOT FOUND')",
+))
+
+
 CELLS.append(md("## Save artifacts to Drive"))
 
 CELLS.append(code(
@@ -821,7 +963,14 @@ CELLS.append(code(
     "        dst = DRIVE_RUNS_ROOT / f'{RUN_ID}_{run_name}'",
     "        if dst.exists(): shutil.rmtree(dst)",
     "        shutil.copytree(src, dst)",
-    "        print(f'copied {src.name} → {dst}')",
+    "        print(f'copied {src.name} -> {dst}')",
+    "    # Also copy identifiability artifacts (read-only diagnostics)",
+    "    ident_src = REPO_ROOT / 'artifacts' / 'cyclelayer_v3' / 'theta_identifiability'",
+    "    if ident_src.exists():",
+    "        ident_dst = DRIVE_RUNS_ROOT / f'{RUN_ID}_theta_identifiability'",
+    "        if ident_dst.exists(): shutil.rmtree(ident_dst)",
+    "        shutil.copytree(ident_src, ident_dst)",
+    "        print(f'copied theta_identifiability/ -> {ident_dst}')",
     "else:",
     "    print('DRIVE_RUNS_ROOT is None; skipping Drive copy.')",
 ))
