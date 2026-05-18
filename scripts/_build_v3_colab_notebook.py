@@ -951,6 +951,124 @@ CELLS.append(code(
 ))
 
 
+# =============================================================================
+# RUL Model Sanity & Collapse Diagnostic phase (ADR-0014)
+# =============================================================================
+
+CELLS.append(md(
+    "# RUL Model Sanity & Collapse Diagnostic (ADR-0014)",
+    "",
+    "Following the experiment matrix (A/B/C/D all RMSE ≈ 21.4, predictions clustered",
+    "in a narrow band around the train mean), [ADR-0014](docs/decisions/ADR-0014-rul-collapse-diagnostic.md)",
+    "requires a structured **read-only** diagnostic suite to decide whether the RUL",
+    "head is collapsing to a mean, the implementation is broken, or the task is",
+    "simply harder than current model capacity.",
+    "",
+    "Hard constraints (enforced by every script below):",
+    "* No model architecture changes (`cyclelayer_v3.py` frozen)",
+    "* No YAML / physical-constant changes",
+    "* No hyperparameter tuning loops",
+    "* No EPR / pressure loss reintroduction",
+    "* No DS02 test leakage (`[11, 14, 15]` only evaluated)",
+    "",
+    "Outputs land under `artifacts/cyclelayer_v3/rul_model_sanity/<TIMESTAMP>/`.",
+    "All six scripts share the same `<TIMESTAMP>` via the `RUL_SANITY_SESSION`",
+    "env var set in the next cell.",
+))
+
+CELLS.append(code(
+    "# Pin a single session id so every diagnostic writes to the same dir",
+    "import os, time",
+    "if not os.environ.get('RUL_SANITY_SESSION'):",
+    "    os.environ['RUL_SANITY_SESSION'] = time.strftime('%Y%m%d_%H%M%S')",
+    "SESSION = os.environ['RUL_SANITY_SESSION']",
+    "SESSION_DIR = REPO_ROOT / 'artifacts' / 'cyclelayer_v3' / 'rul_model_sanity' / SESSION",
+    "SESSION_DIR.mkdir(parents=True, exist_ok=True)",
+    "print(f'RUL_SANITY_SESSION = {SESSION}')",
+    "print(f'session dir = {SESSION_DIR}')",
+))
+
+CELLS.append(md(
+    "## Step 4 — Target / window alignment audit",
+    "",
+    "First gate.  Verifies test/dev split disjoint, unit_id assignment, RUL range,",
+    "per-unit monotonic decrease, window endpoint semantics, sample dump.",
+    "**If this FAILS, all other diagnostics are invalid.**",
+))
+CELLS.append(code(
+    "_run_diag('scripts/diagnose_v31b_target_alignment.py')",
+))
+
+CELLS.append(md(
+    "## Step 2+3 — Collapse metrics, trivial baselines, plots",
+    "",
+    "Loads the production C checkpoint (auto-discovered).  Computes overall and",
+    "per-RUL-region metrics, fits constant + per-unit linear baselines, produces",
+    "the six diagnostic plots (scatter, residual, hist, calibration, per-unit",
+    "trajectory, target distribution).",
+))
+CELLS.append(code(
+    "_run_diag('scripts/diagnose_v31b_rul_collapse.py',",
+    "          args=['--run_dir', str(C_RUN_DIR)])",
+))
+
+CELLS.append(md(
+    "## Step 5 — Tiny-overfit smoke test",
+    "",
+    "Trains a fresh `CycleLayerV3` (random init, production architecture) on",
+    "tiny subsets of train windows (256 / 1024 / 4096) for many epochs.",
+    "If the model can't overfit 256 windows it's an implementation problem;",
+    "if it can but collapses on full DS02 it's a generalisation problem.",
+))
+CELLS.append(code(
+    "_run_diag('scripts/test_v31b_rul_overfit_tiny.py',",
+    "          args=['--epochs', '200', '--batch_size', '64'])",
+))
+
+CELLS.append(md(
+    "## Step 6 — Simple ML baselines (Ridge / HGB / RF)",
+    "",
+    "Classical feature-based regressors on DS02 train units → test units.",
+    "Tests H7: if simple baselines crush V3.1b, the architecture/training",
+    "is not competitive against classical ML.",
+))
+CELLS.append(code(
+    "_run_diag('scripts/train_simple_rul_baselines_ds02.py',",
+    "          args=['--models', 'ridge,hgb,rf',",
+    "                '--max_train_windows', '60000',",
+    "                '--max_test_windows', '30000'])",
+))
+
+CELLS.append(md(
+    "## Step 7 — Branch-usage ablations",
+    "",
+    "Loads the production C checkpoint, at the prognostics-head input swaps",
+    "out theta, aux, h_sens, z_ops (zero + shuffle).  A branch is **unused**",
+    "if its ablation leaves RUL essentially unchanged.",
+))
+CELLS.append(code(
+    "_run_diag('scripts/diagnose_v31b_branch_usage.py',",
+    "          args=['--run_dir', str(C_RUN_DIR)])",
+))
+
+CELLS.append(md(
+    "## Step 8 — Aggregate verdict",
+    "",
+    "Reads every diagnostic's `summary.json`, applies the ADR-0014 decision",
+    "logic, writes `RUL_MODEL_SANITY_SUMMARY.md` + `.json`.  **Stop point.**",
+))
+CELLS.append(code(
+    "_run_diag('scripts/build_rul_model_sanity_summary.py')",
+    "",
+    "summary_md = SESSION_DIR / 'RUL_MODEL_SANITY_SUMMARY.md'",
+    "if summary_md.exists():",
+    "    from IPython.display import Markdown, display",
+    "    display(Markdown(summary_md.read_text(encoding='utf-8')))",
+    "else:",
+    "    print('SUMMARY NOT FOUND')",
+))
+
+
 CELLS.append(md("## Save artifacts to Drive"))
 
 CELLS.append(code(
@@ -971,6 +1089,13 @@ CELLS.append(code(
     "        if ident_dst.exists(): shutil.rmtree(ident_dst)",
     "        shutil.copytree(ident_src, ident_dst)",
     "        print(f'copied theta_identifiability/ -> {ident_dst}')",
+    "    # RUL model sanity artifacts (ADR-0014)",
+    "    sanity_src = REPO_ROOT / 'artifacts' / 'cyclelayer_v3' / 'rul_model_sanity'",
+    "    if sanity_src.exists():",
+    "        sanity_dst = DRIVE_RUNS_ROOT / f'{RUN_ID}_rul_model_sanity'",
+    "        if sanity_dst.exists(): shutil.rmtree(sanity_dst)",
+    "        shutil.copytree(sanity_src, sanity_dst)",
+    "        print(f'copied rul_model_sanity/ -> {sanity_dst}')",
     "else:",
     "    print('DRIVE_RUNS_ROOT is None; skipping Drive copy.')",
 ))
